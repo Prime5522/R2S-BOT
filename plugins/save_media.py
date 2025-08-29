@@ -1,6 +1,7 @@
 import asyncio
 import traceback
-from config import BOT_USERNAME, DB_CHANNEL, LOG_CHANNEL, WEBSITE_URL, WEBSITE_URL_MODE
+from os import environ
+from config import BOT_USERNAME, DB_CHANNEL, LOG_CHANNEL, WEBSITE_URL
 from pyrogram import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
@@ -8,14 +9,7 @@ from utils import str_to_b64
 from database import db
 
 BATCH_SLEEP = 2
-
-
-# ✅ Safe button তৈরি করার হেল্পার ফাংশন
-def safe_button(text: str, url: str):
-    if url and isinstance(url, str) and url.startswith(("http://", "https://")):
-        return InlineKeyboardButton(text, url=url)
-    return None
-
+WEBSITE_URL_MODE = bool(environ.get("WEBSITE_URL_MODE", False))  # True or False
 
 # 🔥 Copy message to DB channel safely
 async def copy_to_channel(bot: Client, message: Message, editable: Message):
@@ -32,7 +26,7 @@ async def copy_to_channel(bot: Client, message: Message, editable: Message):
         return None
 
 
-# 🔥 Save Batch Media (fixed)
+# 🔥 Save Batch Media
 async def save_batch_media_in_channel(bot: Client, editable: Message, message_ids: list, owner_uid: int):
     try:
         message_ids_str = ""
@@ -54,42 +48,42 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
         # ✅ Encode user_id + batch_msg_id
         unique_str = f"{owner_uid}:{SaveMessage.id}"
 
-        # ✅ প্রথমে লিঙ্ক বানাও
-        
+        # ✅ Share link বানাও
+        if WEBSITE_URL_MODE:
+            base_url = WEBSITE_URL.strip().rstrip("/")
+            share_link = f"{base_url}/?AVBOTZ=file_{str_to_b64(unique_str)}"
+        else:
             share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
 
-        # ✅ DB থেকে user এর shortlink আনো
+        # ✅ DB से user settings लाओ
         user = await db.get_user(owner_uid)
         short_link = await db.get_short_link(user, share_link)
 
-        # --- Text বানাও ---
+        # --- Text बनाओ ---
         text = (
             "ʜᴇʀᴇ ɪs ʏᴏᴜʀ ʙᴀᴛᴄʜ ꜰɪʟᴇ ʟɪɴᴋ❗\n\n"
             f"ᴏʀɢɪɴᴀʟ ʟɪɴᴋ: {share_link}\n"
         )
-        if short_link and short_link != share_link:
+        if short_link != share_link:
             text += f"\nsʜᴏʀᴛᴇɴ ʟɪɴᴋ: {short_link}\n\n"
         else:
             text += "\n"
         text += "ᴊᴜsᴛ ᴄʟɪᴄᴋ ᴛʜᴇ ʟɪɴᴋ ᴛᴏ ɢᴇᴛ ʏᴏᴜʀ ꜰɪʟᴇ!"
 
-        # --- Buttons বানাও ---
-        buttons = []
-        if short_link and short_link != share_link:
-            btn = safe_button("🔗 sʜᴏʀᴛᴇɴ ʟɪɴᴋ", short_link)
-            if btn: buttons.append([btn])
-
-        btn = safe_button("📂 ᴏʀɢɪɴᴀʟ ʟɪɴᴋ", share_link)
-        if btn: buttons.append([btn])
-
-        buttons.append([
-            safe_button("• ᴜᴘᴅᴀᴛᴇᴅ •", "https://t.me/AV_BOTz_UPDATE"),
-            safe_button("• sᴜᴘᴘᴏʀᴛ •", "https://t.me/AV_SUPPORT_GROUP")
-        ])
+        # --- Buttons बनाओ ---
+        buttons = [
+            [InlineKeyboardButton("📂 ᴏʀɢɪɴᴀʟ ʟɪɴᴋ", url=share_link)],
+            [
+                InlineKeyboardButton("• ᴜᴘᴅᴀᴛᴇᴅ •", url="https://t.me/AV_BOTz_UPDATE"),
+                InlineKeyboardButton("• sᴜᴘᴘᴏʀᴛ •", url="https://t.me/AV_SUPPORT_GROUP")
+            ]
+        ]
+        if short_link != share_link:
+            buttons.insert(0, [InlineKeyboardButton("🔗 sʜᴏʀᴛᴇɴ ʟɪɴᴋ", url=short_link)])
 
         await editable.edit(
             text,
-            reply_markup=InlineKeyboardMarkup([b for b in buttons if b]),
+            reply_markup=InlineKeyboardMarkup(buttons),
             disable_web_page_preview=True
         )
 
@@ -98,7 +92,7 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
             chat_id=LOG_CHANNEL,
             text=f"#BATCH_SAVE:\n\nUser [{owner_uid}](tg://user?id={owner_uid}) Got Batch Link!",
             disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup([[safe_button("📂 Open Link", share_link)]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📂 Open Link", url=share_link)]])
         )
 
     except Exception:
@@ -135,45 +129,42 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
         # ✅ Encode user_id + file_id
         unique_str = f"{owner_uid}:{file_er_id}"
 
+        # ✅ Share link बनाओ
         if WEBSITE_URL_MODE:
-            base_url = WEBSITE_URL.strip().rstrip("/")  # safe করে নিলাম
+            base_url = WEBSITE_URL.strip().rstrip("/")
             share_link = f"{base_url}/?AVBOTZ=file_{str_to_b64(unique_str)}"
         else:
             share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
 
-        
-        # ✅ DB থেকে user এর shortlink আনো
+        # ✅ DB से user settings लाओ
         user = await db.get_user(owner_uid)
         short_link = await db.get_short_link(user, share_link)
 
-        # --- Message বানাও ---
+        # --- Message बनाओ ---
         text = (
             "ʜᴇʀᴇ ɪs ʏᴏᴜʀ ꜱʜᴀʀᴀʙʟᴇ ꜰɪʟᴇ ʟɪɴᴋ❗\n\n"
             f"ᴏʀɢɪɴᴀʟ ʟɪɴᴋ: {share_link}\n"
         )
-        if short_link and short_link != share_link:
+        if short_link != share_link:
             text += f"\nsʜᴏʀᴛᴇɴ ʟɪɴᴋ: {short_link}\n\n"
         else:
             text += "\n"
         text += "ᴊᴜsᴛ ᴄʟɪᴄᴋ ᴛʜᴇ ʟɪɴᴋ ᴛᴏ ɢᴇᴛ ʏᴏᴜʀ ꜰɪʟᴇ!"
 
-        # --- Buttons বানাও ---
-        buttons = []
-        if short_link and short_link != share_link:
-            btn = safe_button("🔗 sʜᴏʀᴛᴇɴ ʟɪɴᴋ", short_link)
-            if btn: buttons.append([btn])
-
-        btn = safe_button("📂 ᴏʀɢɪɴᴀʟ ʟɪɴᴋ", share_link)
-        if btn: buttons.append([btn])
-
-        buttons.append([
-            safe_button("• ᴜᴘᴅᴀᴛᴇᴅ •", "https://t.me/AV_BOTz_UPDATE"),
-            safe_button("• sᴜᴘᴘᴏʀᴛ •", "https://t.me/AV_SUPPORT_GROUP")
-        ])
+        # --- Buttons बनाओ ---
+        buttons = [
+            [InlineKeyboardButton("📂 ᴏʀɢɪɴᴀʟ ʟɪɴᴋ", url=share_link)],
+            [
+                InlineKeyboardButton("• ᴜᴘᴅᴀᴛᴇᴅ •", url="https://t.me/AV_BOTz_UPDATE"),
+                InlineKeyboardButton("• sᴜᴘᴘᴏʀᴛ •", url="https://t.me/AV_SUPPORT_GROUP")
+            ]
+        ]
+        if short_link != share_link:
+            buttons.insert(0, [InlineKeyboardButton("🔗 sʜᴏʀᴛᴇɴ ʟɪɴᴋ", url=short_link)])
 
         await editable.edit(
             text,
-            reply_markup=InlineKeyboardMarkup([b for b in buttons if b]),
+            reply_markup=InlineKeyboardMarkup(buttons),
             disable_web_page_preview=True
         )
 
@@ -186,4 +177,4 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
             chat_id=LOG_CHANNEL,
             text=f"#ERROR_FILE:\nChat: `{editable.chat.id}`\n\n**Traceback:**\n`{traceback.format_exc()}`",
             disable_web_page_preview=True
-                                 )
+        )
