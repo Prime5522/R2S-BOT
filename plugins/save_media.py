@@ -55,9 +55,7 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
         unique_str = f"{owner_uid}:{SaveMessage.id}"
 
         # ✅ প্রথমে লিঙ্ক বানাও
-        if WEBSITE_URL_MODE:
-            share_link = f"{WEBSITE_URL}?AVBOTZ=file_{str_to_b64(unique_str)}"
-        else:
+        
             share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
 
         # ✅ DB থেকে user এর shortlink আনো
