@@ -1,7 +1,6 @@
 import asyncio
 import traceback
-from os import environ
-from config import BOT_USERNAME, DB_CHANNEL, LOG_CHANNEL, WEBSITE_URL
+from config import BOT_USERNAME, DB_CHANNEL, LOG_CHANNEL
 from pyrogram import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
@@ -9,7 +8,7 @@ from utils import str_to_b64
 from database import db
 
 BATCH_SLEEP = 2
-WEBSITE_URL_MODE = bool(environ.get("WEBSITE_URL_MODE", False))  # True or False
+
 
 # 🔥 Copy message to DB channel safely
 async def copy_to_channel(bot: Client, message: Message, editable: Message):
@@ -48,18 +47,14 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
         # ✅ Encode user_id + batch_msg_id
         unique_str = f"{owner_uid}:{SaveMessage.id}"
 
-        # ✅ Share link বানাও
-        if WEBSITE_URL_MODE:
-            base_url = WEBSITE_URL.strip().rstrip("/")
-            share_link = f"{base_url}/?AVBOTZ=file_{str_to_b64(unique_str)}"
-        else:
-            share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
+        # ✅ Direct bot link only
+        share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
 
-        # ✅ DB से user settings लाओ
+        # ✅ DB থেকে user settings
         user = await db.get_user(owner_uid)
         short_link = await db.get_short_link(user, share_link)
 
-        # --- Text बनाओ ---
+        # --- Text বানাও ---
         text = (
             "ʜᴇʀᴇ ɪs ʏᴏᴜʀ ʙᴀᴛᴄʜ ꜰɪʟᴇ ʟɪɴᴋ❗\n\n"
             f"ᴏʀɢɪɴᴀʟ ʟɪɴᴋ: {share_link}\n"
@@ -70,7 +65,7 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
             text += "\n"
         text += "ᴊᴜsᴛ ᴄʟɪᴄᴋ ᴛʜᴇ ʟɪɴᴋ ᴛᴏ ɢᴇᴛ ʏᴏᴜʀ ꜰɪʟᴇ!"
 
-        # --- Buttons बनाओ ---
+        # --- Buttons বানাও ---
         buttons = [
             [InlineKeyboardButton("📂 ᴏʀɢɪɴᴀʟ ʟɪɴᴋ", url=share_link)],
             [
@@ -129,18 +124,14 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
         # ✅ Encode user_id + file_id
         unique_str = f"{owner_uid}:{file_er_id}"
 
-        # ✅ Share link बनाओ
-        if WEBSITE_URL_MODE:
-            base_url = WEBSITE_URL.strip().rstrip("/")
-            share_link = f"{base_url}/?AVBOTZ=file_{str_to_b64(unique_str)}"
-        else:
-            share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
+        # ✅ Direct bot link only
+        share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
 
-        # ✅ DB से user settings लाओ
+        # ✅ DB থেকে user settings
         user = await db.get_user(owner_uid)
         short_link = await db.get_short_link(user, share_link)
 
-        # --- Message बनाओ ---
+        # --- Message বানাও ---
         text = (
             "ʜᴇʀᴇ ɪs ʏᴏᴜʀ ꜱʜᴀʀᴀʙʟᴇ ꜰɪʟᴇ ʟɪɴᴋ❗\n\n"
             f"ᴏʀɢɪɴᴀʟ ʟɪɴᴋ: {share_link}\n"
@@ -151,7 +142,7 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
             text += "\n"
         text += "ᴊᴜsᴛ ᴄʟɪᴄᴋ ᴛʜᴇ ʟɪɴᴋ ᴛᴏ ɢᴇᴛ ʏᴏᴜʀ ꜰɪʟᴇ!"
 
-        # --- Buttons बनाओ ---
+        # --- Buttons বানাও ---
         buttons = [
             [InlineKeyboardButton("📂 ᴏʀɢɪɴᴀʟ ʟɪɴᴋ", url=share_link)],
             [
@@ -177,4 +168,4 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
             chat_id=LOG_CHANNEL,
             text=f"#ERROR_FILE:\nChat: `{editable.chat.id}`\n\n**Traceback:**\n`{traceback.format_exc()}`",
             disable_web_page_preview=True
-        )
+                                                )
