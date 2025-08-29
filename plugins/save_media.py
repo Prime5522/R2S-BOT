@@ -138,10 +138,12 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
         unique_str = f"{owner_uid}:{file_er_id}"
 
         if WEBSITE_URL_MODE:
-            share_link = f"{WEBSITE_URL}?AVBOTZ=file_{str_to_b64(unique_str)}"
+            base_url = WEBSITE_URL.strip().rstrip("/")  # safe করে নিলাম
+            share_link = f"{base_url}/?AVBOTZ=file_{str_to_b64(unique_str)}"
         else:
             share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
 
+        
         # ✅ DB থেকে user এর shortlink আনো
         user = await db.get_user(owner_uid)
         short_link = await db.get_short_link(user, share_link)
