@@ -1,0 +1,9 @@
+pyrofork==2.3.45
+tgcrypto
+pytz
+aiohttp
+motor==3.3.2
+pymongo==4.6.1
+python-dotenv==1.0.1
+httpx
+shortzy
