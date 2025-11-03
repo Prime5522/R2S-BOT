@@ -210,8 +210,8 @@ async def cb_handler(client: Client, query: CallbackQuery):
         is_on = user.get("permanent_link_mode", True)
         text = (
             "**🔗 Pᴇʀᴍᴀɴᴇɴᴛ Lɪɴᴋ Sᴇᴛᴛɪɴɢꜱ**\n\n"
-            "এই মোডটি চালু থাকলে, আপনার ফাইল লিঙ্কে Vercel/Website URL ব্যবহার করা হবে (যেমন: `https://.../file_id...`), যা একটি ওয়েব পেজ দেখাবে।\n\n"
-            "এটি বন্ধ থাকলে, সরাসরি টেলিগ্রামের `t.me` লিঙ্ক তৈরি হবে, যা ব্যবহারকারীকে সরাসরি আপনার বটে নিয়ে আসবে।\n\n"
+            "When this mode is enabled, your file link will use the Vercel/Website URL (e.g. https://.../file_id...), which will display a web page.\n\n"
+            "When it is disabled, a direct Telegram t.me link will be generated, taking the user straight to your bot.\n\n"
             f"**ᴄᴜʀʀᴇɴᴛ sᴛᴀᴛᴜs:** `{'ON ✅' if is_on else 'OFF ❌'}`"
         )
         buttons = [
