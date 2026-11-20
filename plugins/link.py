@@ -3,25 +3,27 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
 import asyncio
 
-from config import BOT_USERNAME, VERIFY, HOW_TO_VERIFY, LOG_CHANNEL, DB_CHANNEL, IS_FSUB
+from config import VERIFY, HOW_TO_VERIFY, LOG_CHANNEL, DB_CHANNEL, IS_FSUB
 from utils import str_to_b64, check_verification, get_token
-from database import db
+from database import db, get_db
 from Script import script
 from plugins.fsub import get_fsub
 
 
 async def av_verification(client, message, owner_uid: int = None):
+    db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     user_id = message.from_user.id
-    
+
     owner = await db.get_user(owner_uid)
     download = owner.get("how_to_download", HOW_TO_VERIFY)
     verify = owner.get("verify", VERIFY)
 
     if verify and not await check_verification(client, user_id):
+        bot_username = getattr(client, "username", None) or (await client.get_me()).username
         btn = [[
             InlineKeyboardButton(
                 "✅️ ᴠᴇʀɪғʏ ✅️",
-                url=await get_token(client, user_id, f"https://t.me/{BOT_USERNAME}?start=")
+                url=await get_token(client, user_id, f"https://t.me/{bot_username}?start=")
             ),
             InlineKeyboardButton("⁉️ ʜᴏᴡ ᴛᴏ ᴠᴇʀɪғʏ ⁉️", url=download)
         ]]
@@ -48,6 +50,7 @@ async def av_verification(client, message, owner_uid: int = None):
 
 @Client.on_message((filters.document | filters.video | filters.audio) & ~filters.chat(DB_CHANNEL))
 async def main(bot: Client, message):
+    db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
 
     # 🛡️ Sender Check (user / channel / anonymous)
     if message.from_user:
@@ -107,7 +110,8 @@ async def main(bot: Client, message):
 
             # ✅ user_id + file_id base64 encode
             unique_str = f"{owner_uid}:{file_er_id}"
-            share_link = f"https://t.me/{BOT_USERNAME}?start=_{str_to_b64(unique_str)}"
+            bot_username = getattr(bot, "username", None) or (await bot.get_me()).username
+            share_link = f"https://t.me/{bot_username}?start=_{str_to_b64(unique_str)}"
 
             # ✅ Inline Button update করা
             await bot.edit_message_reply_markup(
