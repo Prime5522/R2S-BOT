@@ -1,10 +1,12 @@
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
-from database import db   # আপনার db wrapper
+from database import db, get_db   # আপনার db wrapper
 
 # ------------------------ /settings ------------------------
 @Client.on_message(filters.command("settings") & filters.private)
 async def settings_command(client: Client, message: Message):
+    db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db (অব্যবহৃত হলেও
+                           # ভবিষ্যতে এই ফাইলে db ব্যবহার করা কোড যোগ হলে সঠিক db-ই পাবে)
     user_id = message.from_user.id
     buttons = [
         [InlineKeyboardButton("📝 Cᴀᴘᴛɪᴏɴ Sᴇᴛᴛɪɴɢꜱ", callback_data=f"caption_setgs#{user_id}")],
