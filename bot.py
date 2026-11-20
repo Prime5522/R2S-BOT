@@ -6,6 +6,7 @@ from clone_manager import load_all_clones
 import pytz
 from datetime import date, datetime
 
+
 class Bot(Client):
     def __init__(self):
         super().__init__(
@@ -22,49 +23,51 @@ class Bot(Client):
     async def start(self):
         await super().start()
         me = await self.get_me()
+        self.bot_id = me.id
         self.mention = me.mention
         self.username = me.username
-        # ✨ এটা মূল বট — ক্লোন না, তাই is_clone সবসময় False থাকবে।
+        # Main bot (not a clone)
         self.is_clone = False
         self.custom_start_pic = None
         self.custom_start_txt = None
+        self.custom_start_buttons = []
 
         tz = pytz.timezone('Asia/Kolkata')
         today = date.today()
         now = datetime.now(tz)
         time = now.strftime("%H:%M:%S %p")
 
-        # 🌍 Web Server Initialization ✅
+        # Web Server Initialization
         app_instance = await web_server()
         app_runner = web.AppRunner(app_instance)
         await app_runner.setup()
         site = web.TCPSite(app_runner, "0.0.0.0", int(PORT))
         await site.start()
 
-        print(f"{me.first_name} 𝚂𝚃𝙰𝚁𝚃𝙴𝙳 ⚡️⚡️⚡️")
+        print(f"{me.first_name} STARTED ⚡️⚡️⚡️")
 
-        # ✨ আগে থেকে সেভ করা সব অ্যাক্টিভ ক্লোন আবার চালু করা (hosting restart হলেও)
+        # Restore all active saved clones
         try:
             await load_all_clones()
-            print("✨ Aʟʟ Sᴀᴠᴇᴅ Cʟᴏɴᴇꜱ Rᴇꜱᴛᴏʀᴇᴅ ✨")
+            print("✨ All Saved Clones Restored ✨")
         except Exception as e:
             print(f"❌ Failed to restore clones: {e}")
 
-        # ✅ ADMINS को मैसेज भेजना
+        # Notify Admins
         if isinstance(ADMINS, list):
             for admin in ADMINS:
-                await self.send_message(admin, f"**__{me.first_name} Iꜱ Sᴛᴀʀᴛᴇᴅ.....✨️😅😅😅__**")
+                await self.send_message(admin, f"**__{me.first_name} Is Started.....✨️__**")
         else:
-            await self.send_message(ADMINS, f"**__{me.first_name} Iꜱ Sᴛᴀʀᴛᴇᴅ.....✨️😅😅😅__**")
+            await self.send_message(ADMINS, f"**__{me.first_name} Is Started.....✨️__**")
 
-        # ✅ LOG_CHANNEL में Restart Log भेजना
+        # Send Restart Log
         await self.send_message(
             LOG_CHANNEL,
             text=(
-                f"<b>ʀᴇsᴛᴀʀᴛᴇᴅ 🤖\n\n"
-                f"📆 ᴅᴀᴛᴇ - <code>{today}</code>\n"
-                f"🕙 ᴛɪᴍᴇ - <code>{time}</code>\n"
-                f"🌍 ᴛɪᴍᴇ ᴢᴏɴᴇ - <code>Asia/Kolkata</code></b>"
+                f"<b>Restarted 🤖\n\n"
+                f"📆 Date - <code>{today}</code>\n"
+                f"🕙 Time - <code>{time}</code>\n"
+                f"🌍 Time Zone - <code>Asia/Kolkata</code></b>"
             )
         )
 
@@ -78,5 +81,6 @@ class Bot(Client):
         await super().stop()
         print("Bot Stopped")
 
-# ✅ Run the Bot
+
+# Run the Bot
 Bot().run()
