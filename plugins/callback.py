@@ -1,4 +1,4 @@
-import asyncio, time, re
+import asyncio, time
 from pyrogram import Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
@@ -6,16 +6,17 @@ from config import *
 from utils import get_hash
 from Script import script
 from plugins.save_media import save_batch_media_in_channel, save_media_in_channel
-from database import db, get_db
-from shortzy import Shortzy
-
-# ✨ Clone Mode ইম্পোর্ট
 from database.clonedb import clone_db
-from clone_manager import start_clone, stop_clone, restart_clone, delete_clone, RUNNING_CLONES
+from plugins.clone import (
+    build_start_content,
+    handle_clone_callback,
+    set_pending_input,
+    clear_pending_input,
+    resolve_target_db,
+    resolve_target_client,
+    send_or_edit_text,
+)
 
-MediaList = {}
-ConfirmMsgs = {}
-UserFiles = {}
 
 async def safe_send_cached_media(client, chat_id, file_id):
     while True:
@@ -23,6 +24,7 @@ async def safe_send_cached_media(client, chat_id, file_id):
             return await client.send_cached_media(chat_id=chat_id, file_id=file_id)
         except FloodWait as e:
             await asyncio.sleep(e.value)
+
 
 # ==== Helper: get real Telegram file_id from message_id ====
 async def get_real_file_id(client, msg_id):
@@ -32,99 +34,127 @@ async def get_real_file_id(client, msg_id):
         return None
     return media.file_id
 
-# ✨ Manage Clone প্যানেল দেখানোর হেল্পার (একাধিক জায়গা থেকে কল হয়, তাই আলাদা ফাংশন)
-async def show_manage_clone_panel(query: CallbackQuery, clone_doc: dict):
-    bot_id = clone_doc["bot_id"]
-    status = clone_doc.get("status", "active")
-    status_label = "✅ ᴀᴄᴛɪᴠᴇ" if status == "active" else "⛔ ɪɴᴀᴄᴛɪᴠᴇ"
-    toggle_label = "⛔ Dᴇᴀᴄᴛɪᴠᴀᴛᴇ" if status == "active" else "✅ Aᴄᴛɪᴠᴀᴛᴇ"
 
-    buttons = [
-        [InlineKeyboardButton("🖼 Sᴇᴛ Sᴛᴀʀᴛ Pɪᴄᴛᴜʀᴇ", callback_data=f"clone_setpic#{bot_id}")],
-        [InlineKeyboardButton("📝 Sᴇᴛ Sᴛᴀʀᴛ Mᴇssᴀɢᴇ", callback_data=f"clone_setmsg#{bot_id}")],
-        [
-            InlineKeyboardButton("🔁 Rᴇꜱᴛᴀʀᴛ", callback_data=f"clone_restart#{bot_id}"),
-            InlineKeyboardButton(toggle_label, callback_data=f"clone_toggle#{bot_id}")
-        ],
-        [InlineKeyboardButton("🗑 Dᴇʟᴇᴛᴇ Cʟᴏɴᴇ", callback_data=f"clone_delete#{bot_id}")],
-        [InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data="start")]
-    ]
-    text = (
-        "<b>✨ Mᴀɴᴀɢᴇ Yᴏᴜʀ Cʟᴏɴᴇ</b>\n\n"
-        f"🤖 ʙᴏᴛ: @{clone_doc.get('bot_username')}\n"
-        f"📌 ꜱᴛᴀᴛᴜꜱ: {status_label}\n\n"
-        "ɴɪᴄᴇ ʙᴀᴛᴀᴍ ᴅɪʏᴇ ᴀᴘɴᴀʀ ᴄʟᴏɴ ᴄᴀᴌᴀᴍᴀᴊ (ꜱᴛᴀʀᴛ ᴘɪᴄᴛᴜʀᴇ/ᴍᴇꜱᴇᴊ, ʀᴇꜱᴛᴀʀᴛ, ᴀᴄᴛɪᴠᴇ/ɪɴᴀᴄᴛɪᴠᴇ, ᴅᴇʟᴇᴛᴇ) ᴋᴏʀᴜɴ।"
+def parse_settings_target(data: str, fallback_uid: int):
+    """
+    Parse callback patterns:
+      prefix#user_id
+      prefix#user_id#clone_bot_id
+    """
+    parts = data.split("#")
+    target_uid = int(parts[1]) if len(parts) > 1 and parts[1] else fallback_uid
+    clone_bot_id = int(parts[2]) if len(parts) > 2 and parts[2] else None
+    return target_uid, clone_bot_id
+
+
+def parse_toggle_target(data: str, fallback_uid: int):
+    """
+    Parse callback patterns:
+      prefix#user_id#status
+      prefix#user_id#status#clone_bot_id
+    """
+    parts = data.split("#")
+    target_uid = int(parts[1]) if len(parts) > 1 and parts[1] else fallback_uid
+    status = parts[2] if len(parts) > 2 else "False"
+    clone_bot_id = int(parts[3]) if len(parts) > 3 and parts[3] else None
+    return target_uid, status, clone_bot_id
+
+
+def build_suffix(target_uid: int, clone_bot_id: int = None) -> str:
+    return f"{target_uid}#{clone_bot_id}" if clone_bot_id else f"{target_uid}"
+
+
+async def edit_caption_or_text(query: CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup):
+    if query.message.photo:
+        return await query.message.edit_caption(
+            caption=text,
+            reply_markup=reply_markup,
+            parse_mode=enums.ParseMode.HTML,
+        )
+    return await query.message.edit_text(
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=enums.ParseMode.HTML,
+        disable_web_page_preview=True,
     )
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 @Client.on_callback_query()
 async def cb_handler(client: Client, query: CallbackQuery):
+    # Handle all Clone Mode callbacks first
+    if await handle_clone_callback(client, query):
+        return
+
     user_id = query.from_user.id
-    db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db (এই লাইনের নিচে
-                           # ফাংশনের বাকি অংশে ব্যবহৃত সব `db.` কল এখন এই লোকাল ভ্যারিয়েবলই ব্যবহার করবে)
 
     if query.data == "close_data":
         await query.message.delete()
-        
+
     elif query.data == "about":
         buttons = [[
-	    InlineKeyboardButton('• ʜᴏᴍᴇ •', callback_data='start'),
-	    InlineKeyboardButton('• ᴄʟᴏsᴇ •', callback_data='close_data')
+            InlineKeyboardButton('• Home •', callback_data='start'),
+            InlineKeyboardButton('• Close •', callback_data='close_data')
         ]]
         reply_markup = InlineKeyboardMarkup(buttons)
         me2 = (await client.get_me()).mention
-        await query.message.edit_text(
-            text=script.ABOUT_TXT.format(me2, me2),
-            reply_markup=reply_markup,
-            parse_mode=enums.ParseMode.HTML
+        await edit_caption_or_text(
+            query,
+            script.ABOUT_TXT.format(me2, me2),
+            reply_markup,
         )
-    
-    elif query.data == "start":
-        buttons = [[
-            InlineKeyboardButton("• ᴜᴘᴅᴀᴛᴇᴅ •", url="https://t.me/PrimeXBots"),
-                InlineKeyboardButton("• sᴜᴘᴘᴏʀᴛ •", url="https://t.me/Prime_Support_group")
-        ],[
-            InlineKeyboardButton('• ʜᴇʟᴘ •', callback_data='help'),
-            InlineKeyboardButton('• ᴀʙᴏᴜᴛ •', callback_data='about')
-        ]]
-        # ✨ ক্লোন মোড বাটন (Commands.py এর send_start_message এর মতোই লজিক)
-        if getattr(client, "is_clone", False):
-            buttons.append([
-                InlineKeyboardButton(
-                    "✨ ᴄʀᴇᴀᴛᴇ ᴍʏ ᴏᴡɴ ᴄʟᴏɴᴇ",
-                    url=f"https://t.me/{MAIN_BOT_USERNAME}?start=clone"
-                )
-            ])
-        else:
-            buttons.append([InlineKeyboardButton("✨ ᴄʀᴇᴀᴛᴇ ᴍʏ ᴏᴡɴ ᴄʟᴏɴᴇ", callback_data="create_clone")])
 
-        reply_markup = InlineKeyboardMarkup(buttons)
-        start_txt = getattr(client, "custom_start_txt", None) or script.START_TXT
-        try:
-            start_caption = start_txt.format(query.from_user.mention)
-        except Exception:
-            start_caption = start_txt
-        await query.message.edit_text(
-            text=start_caption,
-            reply_markup=reply_markup,
-            parse_mode=enums.ParseMode.HTML
-	    )
-	    
+    elif query.data == "start":
+        await clear_pending_input(client, user_id)
+        start_pic, caption_text, reply_markup = await build_start_content(client, query.from_user.mention)
+
+        if query.message.photo:
+            if start_pic:
+                await query.message.edit_caption(
+                    caption=caption_text,
+                    reply_markup=reply_markup,
+                    parse_mode=enums.ParseMode.HTML,
+                )
+            else:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.reply_text(
+                    text=caption_text,
+                    reply_markup=reply_markup,
+                    parse_mode=enums.ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+        else:
+            if start_pic:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.reply_photo(
+                    photo=start_pic,
+                    caption=caption_text,
+                    reply_markup=reply_markup,
+                    parse_mode=enums.ParseMode.HTML,
+                )
+            else:
+                await query.message.edit_text(
+                    text=caption_text,
+                    reply_markup=reply_markup,
+                    parse_mode=enums.ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+
     elif query.data == "help":
         buttons = [[
-	    InlineKeyboardButton('• ʜᴏᴍᴇ •', callback_data='start'),
-	    InlineKeyboardButton('• ᴄʟᴏsᴇ •', callback_data='close_data')
+            InlineKeyboardButton('• Home •', callback_data='start'),
+            InlineKeyboardButton('• Close •', callback_data='close_data')
         ]]
         reply_markup = InlineKeyboardMarkup(buttons)
-        await query.message.edit_text(
-            text=script.HELP_TXT,
-            reply_markup=reply_markup,
-            parse_mode=enums.ParseMode.HTML
-        )     
+        await edit_caption_or_text(query, script.HELP_TXT, reply_markup)
 
     elif query.data.startswith("stream"):
-        msg_id = int(query.data.split('#', 1)[1])  # ये है message_id
+        msg_id = int(query.data.split('#', 1)[1])
 
         try:
             msg = await client.get_messages(DB_CHANNEL, msg_id)
@@ -144,38 +174,38 @@ async def cb_handler(client: Client, query: CallbackQuery):
         download = f"{URL}/{AKS.id}?hash={file_hash}"
 
         btn = [
-                [
-                    InlineKeyboardButton("▶ ᴡᴀᴛᴄʜ ᴏɴʟɪɴᴇ", url=online),
-                    InlineKeyboardButton("⬇ ꜰᴀsᴛ ᴅᴏᴡɴʟᴏᴀᴅ", url=download)
-                ],
-                [InlineKeyboardButton('❌ ᴄʟᴏsᴇ ❌', callback_data='close_data')]
+            [
+                InlineKeyboardButton("▶ Watch Online", url=online),
+                InlineKeyboardButton("⬇ Fast Download", url=download)
+            ],
+            [InlineKeyboardButton('❌ Close ❌', callback_data='close_data')]
         ]
 
-        return await query.edit_message_reply_markup(
-            reply_markup=InlineKeyboardMarkup(btn)
-		)
+        return await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
 
     elif query.data == "addToBatchTrue":
+        cur_db = await resolve_target_db(client)
         file_msg_id = query.message.reply_to_message.id
-        await db.add_media(user_id, file_msg_id)
-        await db.add_user_file(user_id, file_msg_id)
+        await cur_db.add_media(user_id, file_msg_id)
+        await cur_db.add_user_file(user_id, file_msg_id)
         confirm = await query.message.edit(
-            "✅ ꜰɪʟᴇ sᴀᴠᴇᴅ ɪɴ ʙᴀᴛᴄʜ!\n\nᴘʀᴇss ʙᴇʟᴏᴡ ʙᴜᴛᴛᴏɴ ᴛᴏ ɢᴇᴛ ʙᴀᴛᴄʜ ʟɪɴᴋ..",
+            "✅ File saved in batch!\n\nPress the button below to generate your batch link:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📦 Gᴇᴛ Bᴀᴛᴄʜ Lɪɴᴋ", callback_data="getBatchLink")],
-                [InlineKeyboardButton("❌ ᴄʟᴏsᴇ", callback_data='close_data')]
+                [InlineKeyboardButton("📦 Get Batch Link", callback_data="getBatchLink")],
+                [InlineKeyboardButton("❌ Close", callback_data='close_data')]
             ])
         )
-        await db.add_confirm_msg(user_id, confirm.id)
+        await cur_db.add_confirm_msg(user_id, confirm.id)
         return
 
     elif query.data == "getBatchLink":
-        message_ids = await db.get_media(user_id)
+        cur_db = await resolve_target_db(client)
+        message_ids = await cur_db.get_media(user_id)
         if not message_ids:
-            return await query.answer("⚠️ Bᴀᴛᴄʜ Lɪꜱᴛ Eᴍᴘᴛʏ!", show_alert=True)
+            return await query.answer("⚠️ Batch list is empty!", show_alert=True)
         editable = await client.send_message(
             chat_id=query.message.chat.id,
-            text="⏳ ᴘʟᴇᴀsᴇ ᴡᴀɪᴛ ɢᴇɴᴇʀᴀᴛɪɴɢ ʙᴀᴛᴄʜ ʟɪɴᴋ..."
+            text="⏳ Please wait, generating batch link..."
         )
         await save_batch_media_in_channel(
             bot=client,
@@ -183,670 +213,581 @@ async def cb_handler(client: Client, query: CallbackQuery):
             message_ids=message_ids,
             owner_uid=user_id
         )
-        await db.clear_media(user_id)
+        await cur_db.clear_media(user_id)
+
         async def delete_later():
             await asyncio.sleep(30)
-            for msg_id in await db.get_confirm_msgs(user_id):
-                try: await client.delete_messages(chat_id=query.message.chat.id, message_ids=msg_id)
-                except: pass
-            await db.clear_confirm_msgs(user_id)
-            for msg_id in await db.get_user_files(user_id):
-                try: await client.delete_messages(chat_id=query.message.chat.id, message_ids=msg_id)
-                except: pass
-            await db.clear_user_files(user_id)
+            for msg_id in await cur_db.get_confirm_msgs(user_id):
+                try:
+                    await client.delete_messages(chat_id=query.message.chat.id, message_ids=msg_id)
+                except Exception:
+                    pass
+            await cur_db.clear_confirm_msgs(user_id)
+            for msg_id in await cur_db.get_user_files(user_id):
+                try:
+                    await client.delete_messages(chat_id=query.message.chat.id, message_ids=msg_id)
+                except Exception:
+                    pass
+            await cur_db.clear_user_files(user_id)
+
         asyncio.create_task(delete_later())
         return
-		
+
     elif query.data == "addToBatchFalse":
         await save_media_in_channel(
             bot=client,
             message=query.message.reply_to_message,
             editable=query.message
-		)
+        )
         if query.message.reply_to_message:
             await query.message.reply_to_message.delete()
         return
-		
+
     elif query.data.startswith("user_reset"):
-        await db.reset_user(int(user_id))
-        await query.answer("✅ Yᴏᴜʀ ꜱᴇᴛᴛɪɴɢꜱ ʜᴀᴠᴇ ʙᴇᴇɴ ʀᴇꜱᴇᴛ ꜱᴜᴄᴄᴇꜱꜱғᴜʟʟʏ.", show_alert=True)
-        buttons = [[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"user_details#{user_id}")]]
-        await query.message.edit_text(
-            "⚙️ ᴀʟʟ ʏᴏᴜʀ ᴜsᴇʀ ᴅᴀᴛᴀ ʜᴀꜱ ʙᴇᴇɴ ʀᴇsᴇᴛ.!\n\nʏᴏᴜ ᴄᴀɴ ɴᴏᴡ ꜰʀᴇsʜʟʏ ᴜꜱᴇ ᴛʜᴇ ʙᴏᴛ.",
-            reply_markup=InlineKeyboardMarkup(buttons)
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        await cur_db.reset_user(target_uid)
+        await query.answer("✅ Your settings have been reset successfully.", show_alert=True)
+        buttons = [[InlineKeyboardButton("« Back", callback_data=f"user_details#{sfx}")]]
+        await send_or_edit_text(
+            query,
+            "⚙️ All of your settings have been reset to default!\n\nYou can now configure them freshly.",
+            InlineKeyboardMarkup(buttons),
         )
-		
+
     elif query.data.startswith("user_details"):
-        user = await db.get_user(int(user_id))
-        shortener_api = user.get("shortener_api") or "ɴᴏᴛ sᴇᴛ"
-        base_site = user.get("base_site") or "ɴᴏᴛ sᴇᴛ"
-        custom_caption = user.get("custom_caption") or "ɴᴏᴛ sᴇᴛ"
-        verify_api = user.get("verify_api") or "ɴᴏᴛ sᴇᴛ"
-        verify_site = user.get("verify_site") or "ɴᴏᴛ sᴇᴛ"
-        verify_expire = user.get("verify_expire") or "ɴᴏᴛ sᴇᴛ"
-        how_to_download = user.get("how_to_download") or "ɴᴏᴛ sᴇᴛ"
-        verify = "✅ True" if user.get("verify") else "❌ False"
-        log_channel = user.get("log_channel") or "ɴᴏᴛ sᴇᴛ"
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        user = await cur_db.get_user(target_uid)
+        shortener_api = user.get("shortener_api") or "Not Set"
+        base_site = user.get("base_site") or "Not Set"
+        custom_caption = user.get("custom_caption") or "Not Set"
+        verify_api = user.get("verify_api") or "Not Set"
+        verify_site = user.get("verify_site") or "Not Set"
+        verify_expire = user.get("verify_expire") or "Not Set"
+        how_to_download = user.get("how_to_download") or "Not Set"
+        verify = "✅ Enabled" if user.get("verify") else "❌ Disabled"
+        log_channel = user.get("log_channel") or "Not Set"
         fsub_channels = user.get("fsub_channels") or []
-        protect_content = "✅ True" if user.get("protect_content") else "❌ False"
+        protect_content = "✅ Enabled" if user.get("protect_content") else "❌ Disabled"
         text = (
-            "⚙️ ** ʏᴏᴜʀ sᴇᴛᴛɪɴɢs ꜰᴏʀ ꜰɪʟᴇ sᴛᴏʀᴇ\n\n"
-            f"✅️  ᴠᴇʀɪꜰʏ sʜᴏʀᴛɴᴇʀ ɴᴀᴍᴇ/ᴀᴘɪ\n"
-            f"ɴᴀᴍᴇ - {verify_site}\n"
-            f"ᴀᴘɪ - {verify_api}\n\n"
-            f"✅ sʜᴏʀᴛɴᴇʀ ɴᴀᴍᴇ/ᴀᴘɪ\n"
-            f"ɴᴀᴍᴇ - {base_site}\n"
-            f"ᴀᴘɪ - {shortener_api}\n\n"
-            f"🧭 ᴠᴇʀɪꜰɪᴄᴀᴛɪᴏɴ ᴛɪᴍᴇ - {verify_expire}\n\n"
-            f"📘 ᴠᴇʀɪꜰʏ - {verify}\n\n"
-            f"⚡ ᴛᴜᴛᴏʀɪᴀʟ ʟɪɴᴋ - {how_to_download}\n\n"
-            f"⭕️ ᴘʀᴏᴛᴇᴄᴛ ᴄᴏɴᴛᴇɴᴛ - {protect_content}\n\n"
-            f"🧾 ꜰ-sᴜʙ ᴄʜᴀɴɴᴇʟ - {', '.join([str(ch) for ch in fsub_channels]) if fsub_channels else 'ɴᴏᴛ sᴇᴛ'}\n\n"
-            f"📜 ʟᴏɢ ᴄʜᴀɴɴᴇʟ - {log_channel}\n\n"
-            f"📝 ᴄᴀᴘᴛɪᴏɴ - {custom_caption}\n"
+            "<b>⚙️ Your File Store Settings</b>\n\n"
+            f"<b>✅ Verify Shortener:</b>\n"
+            f"• Site: <code>{verify_site}</code>\n"
+            f"• API: <code>{verify_api}</code>\n\n"
+            f"<b>🔗 File Shortener:</b>\n"
+            f"• Site: <code>{base_site}</code>\n"
+            f"• API: <code>{shortener_api}</code>\n\n"
+            f"<b>🧭 Verification Time:</b> <code>{verify_expire}</code>\n"
+            f"<b>📘 Verify Status:</b> {verify}\n"
+            f"<b>⚡ Tutorial Link:</b> {how_to_download}\n"
+            f"<b>🛡 Protect Content:</b> {protect_content}\n"
+            f"<b>📢 F-Sub Channels:</b> {', '.join([str(ch) for ch in fsub_channels]) if fsub_channels else 'Not Set'}\n"
+            f"<b>📜 Log Channel:</b> <code>{log_channel}</code>\n"
+            f"<b>📝 Caption:</b> <code>{custom_caption}</code>"
         )
         btn = [
-            [InlineKeyboardButton("♻ Rᴇꜱᴇᴛ Sᴇᴛᴛɪɴɢꜱ", callback_data=f"user_reset#{user_id}")],
-            [InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"settings#{user_id}")]
+            [InlineKeyboardButton("♻️ Reset Settings", callback_data=f"user_reset#{sfx}")],
+            [InlineKeyboardButton("« Back", callback_data=f"settings#{sfx}")]
         ]
-        await query.message.edit(text, reply_markup=InlineKeyboardMarkup(btn))
+        await send_or_edit_text(query, text, InlineKeyboardMarkup(btn))
 
-    # ------------------- START OF NEW CODE BLOCK -------------------
     elif query.data.startswith("permanent_link_setgs"):
-        _, user_id = query.data.split("#")
-        user = await db.get_user(int(user_id))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        user = await cur_db.get_user(target_uid)
         is_on = user.get("permanent_link_mode", True)
         text = (
-            "**🔗 Pᴇʀᴍᴀɴᴇɴᴛ Lɪɴᴋ Sᴇᴛᴛɪɴɢꜱ**\n\n"
-            "When this mode is enabled, your file link will use the Vercel/Website URL (e.g. https://.../file_id...), which will display a web page.\n\n"
-            "When it is disabled, a direct Telegram t.me link will be generated, taking the user straight to your bot.\n\n"
-            f"**ᴄᴜʀʀᴇɴᴛ sᴛᴀᴛᴜs:** `{'ON ✅' if is_on else 'OFF ❌'}`"
+            "<b>🔗 Permanent Link Settings</b>\n\n"
+            "When enabled, file links will use the Website URL (e.g. https://.../file_id...), displaying a web page.\n\n"
+            "When disabled, a direct Telegram t.me link will be generated.\n\n"
+            f"<b>Current Status:</b> <code>{'ON ✅' if is_on else 'OFF ❌'}</code>"
         )
         buttons = [
-            [InlineKeyboardButton(f"ᴛᴜʀɴ {'OFF ❌' if is_on else 'ON ✅'}", callback_data=f"toggle_permanent_link#{user_id}#{is_on}")],
-            [InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"settings#{user_id}")]
+            [InlineKeyboardButton(f"Turn {'OFF ❌' if is_on else 'ON ✅'}", callback_data=f"toggle_permanent_link#{target_uid}#{is_on}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [InlineKeyboardButton("« Back", callback_data=f"settings#{sfx}")]
         ]
-        await query.message.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await send_or_edit_text(query, text, InlineKeyboardMarkup(buttons))
 
     elif query.data.startswith("toggle_permanent_link"):
-        _, user_id, status = query.data.split("#")
+        target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
         new_status = False if status == 'True' else True
-        await db.update_user_info(int(user_id), {"permanent_link_mode": new_status})
-        user = await db.get_user(int(user_id))
+        await cur_db.update_user_info(target_uid, {"permanent_link_mode": new_status})
+        user = await cur_db.get_user(target_uid)
         is_on = user.get("permanent_link_mode", True)
         text = (
-            "**🔗 Pᴇʀᴍᴀɴᴇɴᴛ Lɪɴᴋ Sᴇᴛᴛɪɴɢꜱ**\n\n"
-            "এই মোডটি চালু থাকলে, আপনার ফাইল লিঙ্কে Vercel/Website URL ব্যবহার করা হবে (যেমন: `https://.../file_id...`), যা একটি ওয়েব পেজ দেখাবে।\n\n"
-            "এটি বন্ধ থাকলে, সরাসরি টেলিগ্রামের `t.me` লিঙ্ক তৈরি হবে, যা ব্যবহারকারীকে সরাসরি আপনার বটে নিয়ে আসবে।\n\n"
-            f"**ᴄᴜʀʀᴇɴᴛ sᴛᴀᴛᴜs:** `{'ON ✅' if is_on else 'OFF ❌'}`"
+            "<b>🔗 Permanent Link Settings</b>\n\n"
+            "When enabled, file links will use the Website URL (e.g. https://.../file_id...), displaying a web page.\n\n"
+            "When disabled, a direct Telegram t.me link will be generated.\n\n"
+            f"<b>Current Status:</b> <code>{'ON ✅' if is_on else 'OFF ❌'}</code>"
         )
         buttons = [
-            [InlineKeyboardButton(f"ᴛᴜʀɴ {'OFF ❌' if is_on else 'ON ✅'}", callback_data=f"toggle_permanent_link#{user_id}#{is_on}")],
-            [InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"settings#{user_id}")]
+            [InlineKeyboardButton(f"Turn {'OFF ❌' if is_on else 'ON ✅'}", callback_data=f"toggle_permanent_link#{target_uid}#{is_on}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [InlineKeyboardButton("« Back", callback_data=f"settings#{sfx}")]
         ]
-        await query.message.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await send_or_edit_text(query, text, InlineKeyboardMarkup(buttons))
         await query.answer(f"✅ Permanent Link mode is now {'ON' if is_on else 'OFF'}")
-    # -------------------- END OF NEW CODE BLOCK --------------------
-		
+
     elif query.data.startswith("force_channel_setgs"):
-        _, user_id = query.data.split("#")
-        settings = await db.get_user(int(user_id))
-        btn = [[
-            InlineKeyboardButton('sᴇᴛ ᴄʜᴀɴɴᴇʟ ', callback_data=f'set_force_channel#{user_id}'),
-            InlineKeyboardButton('ᴅᴇʟᴇᴛᴇ ᴄʜᴀɴɴᴇʟ', callback_data=f'force_channel_delete#{user_id}')
-        ],[
-            InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'settings#{user_id}')
-        ]]
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        target_client = await resolve_target_client(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        btn = [
+            [
+                InlineKeyboardButton('Set Channel', callback_data=f'set_force_channel#{sfx}'),
+                InlineKeyboardButton('Delete Channels', callback_data=f'force_channel_delete#{sfx}')
+            ],
+            [InlineKeyboardButton('« Back', callback_data=f'settings#{sfx}')]
+        ]
         channels = settings.get("fsub_channels", [])
         if not channels:
-            channel = "ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ ꜰᴏʀᴄᴇ sᴜʙsᴄʀɪʙᴇ ᴄʜᴀɴɴᴇʟ..."
+            channel = "You haven't added any Force Subscribe channels yet."
         else:
             try:
                 chat_titles = []
                 for ch in channels:
-                    chat = await client.get_chat(ch)
+                    chat = await target_client.get_chat(ch)
                     chat_titles.append(f"<b>{chat.title}</b> (<code>{ch}</code>)")
-                channel = "Force Channels:\n" + "\n".join(chat_titles)
+                channel = "<b>Force Subscribe Channels:</b>\n" + "\n".join(chat_titles)
             except Exception as e:
                 channel = f"⚠️ Error fetching channels: <code>{e}</code>"
-        await query.message.edit(
-            f"ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ʙᴏᴛ ꜰᴏʀᴄᴇ sᴜʙsᴄʀɪʙᴇ ᴄʜᴀɴɴᴇʟs.\n\n{channel}", 
-            reply_markup=InlineKeyboardMarkup(btn))
-		
+        await send_or_edit_text(
+            query,
+            f"Manage your Force Subscribe channels below.\n\n{channel}",
+            InlineKeyboardMarkup(btn),
+        )
+
     elif query.data.startswith("force_channel_delete"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'force_channel_setgs#{user_id}')]]
-        settings = await db.get_user(int(user_id))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'force_channel_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
         channels = settings.get("fsub_channels", [])
         if not channels:
-            await query.answer("ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ ꜰᴏʀᴄᴇ sᴜʙsᴄʀɪʙᴇ ᴄʜᴀɴɴᴇʟ...", show_alert=True)
-            return
-        await db.update_user_info(int(user_id), {"fsub_channels": []})
-        await query.message.edit_text("sᴜᴄᴄᴇssꜰᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ ꜰᴏʀᴄᴇ ᴄʜᴀɴɴᴇʟ 🗑", reply_markup=InlineKeyboardMarkup(btn))
+            return await query.answer("You haven't added any Force Subscribe channels.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"fsub_channels": []})
+        await send_or_edit_text(query, "🗑 Successfully deleted all Force Subscribe channels.", InlineKeyboardMarkup(btn))
 
     elif query.data.startswith("set_force_channel"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'force_channel_setgs#{user_id}')]]
-        await query.message.edit_text(
-            f"ꜱᴇɴᴅ ᴏɴᴇ ᴏʀ ᴍᴏʀᴇ ᴄʜᴀɴɴᴇʟ ɪᴅꜱ ꜱᴇᴘᴀʀᴀᴛᴇᴅ ʙʏ ꜱᴘᴀᴄᴇ:\n\n"
-            f"**Example:** `-1001234567890 -1009876543210`\n\n"
-            f"/cancel - ᴄᴀɴᴄᴇʟ ᴛʜɪs ᴘʀᴏᴄᴇss."
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"force_channel_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_force_channel",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
         )
-        msg = await client.listen(query.from_user.id)
-        if msg.text.strip() == "/cancel":
-            await query.message.delete()
-            await query.message.reply("❌ ᴄᴀɴᴄᴇʟʟᴇᴅ ᴛʜɪs ᴘʀᴏᴄᴇss...", reply_markup=InlineKeyboardMarkup(btn))
-            return
-        await query.message.delete()
-        channel_ids = msg.text.split()
-        added_channels, failed_channels = [], []
-        await query.message.delete()
-        settings = await db.get_user(int(user_id))
-        channels = settings.get("fsub_channels", [])
-        for ch_id in channel_ids:
-            try:
-                ch_id = int(ch_id)
-                chat = await client.get_chat(ch_id)
-                try: await client.create_chat_invite_link(chat.id)
-                except Exception:
-                    failed_channels.append(f"{chat.title} (<code>{ch_id}</code>) - ❌ Bot not admin")
-                    continue
-                if ch_id not in channels:
-                    channels.append(ch_id)
-                    added_channels.append(f"{chat.title} (<code>{ch_id}</code>) ✅")
-            except Exception as e:
-                failed_channels.append(f"<code>{ch_id}</code> - ❌ {str(e)}")
-        await query.message.delete()
-        await db.update_user_info(int(user_id), {"fsub_channels": channels})
-        text = "📢 Force Channel Update Result:\n\n"
-        if added_channels: text += "✅ Added:\n" + "\n".join(added_channels) + "\n\n"
-        if failed_channels: text += "⚠️ Failed:\n" + "\n".join(failed_channels)
-        await query.message.reply(text, reply_markup=InlineKeyboardMarkup(btn))
+        await send_or_edit_text(
+            query,
+            "Send one or more channel IDs separated by spaces:\n\n"
+            "<b>Example:</b> <code>-1001234567890 -1009876543210</code>\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
 
     elif query.data.startswith("log_channel_setgs"):
-        _, user_id = query.data.split("#")
-        settings = await db.get_user(int(user_id))
-        btn = [[
-            InlineKeyboardButton('sᴇᴛ ᴄʜᴀɴɴᴇʟ', callback_data=f'set_log_channel#{user_id}'),
-            InlineKeyboardButton('ᴅᴇʟᴇᴛᴇ ᴄʜᴀɴɴᴇʟ', callback_data=f'log_channel_delete#{user_id}')
-        ],[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'settings#{user_id}')]]
-        if settings['log_channel'] == "": channel = "ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ ʟᴏɢ ᴄʜᴀɴɴᴇʟ❗️"
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        target_client = await resolve_target_client(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        btn = [
+            [
+                InlineKeyboardButton('Set Channel', callback_data=f'set_log_channel#{sfx}'),
+                InlineKeyboardButton('Delete Channel', callback_data=f'log_channel_delete#{sfx}')
+            ],
+            [InlineKeyboardButton('« Back', callback_data=f'settings#{sfx}')]
+        ]
+        if not settings.get('log_channel'):
+            channel = "Not Set"
         else:
-            chat = await client.get_chat(settings['log_channel'])
-            channel = f"ʏᴏᴜʀ ʟᴏɢ ᴄʜᴀɴɴᴇʟ - {chat.title}"
-        await query.message.edit(f"<b>📝 ʟᴏɢ ᴄʜᴀɴɴᴇʟ ꜱᴇᴛᴛɪɴɢꜱ:\n\nᴄᴜʀʀᴇɴᴛ ʟᴏɢ ᴄʜᴀɴɴᴇʟ:{channel}</b>", reply_markup=InlineKeyboardMarkup(btn))
-	    
+            try:
+                chat = await target_client.get_chat(settings['log_channel'])
+                channel = chat.title
+            except Exception:
+                channel = str(settings['log_channel'])
+        await send_or_edit_text(
+            query,
+            f"<b>📝 Log Channel Settings</b>\n\n<b>Current Log Channel:</b> {channel}",
+            InlineKeyboardMarkup(btn),
+        )
+
     elif query.data.startswith("set_log_channel"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'log_channel_setgs#{user_id}')]]
-        bot_username = getattr(client, "username", None) or (await client.get_me()).username
-        await query.message.edit_text(f"<b>ꜰᴏʀᴡᴀʀᴅ ʟᴏɢ ᴄʜᴀɴɴᴇʟ ᴀɴʏ ᴍᴇssᴀɢᴇ ᴛᴏ ᴍᴇ,\nᴀɴᴅ ᴍᴀᴋᴇ sᴜʀᴇ @{bot_username} ɪs ᴀᴅᴍɪɴ ɪɴ ʏᴏᴜʀ ᴄʜᴀɴɴᴇʟ.\n\n/cancel - ᴄᴀɴᴄᴇʟ ᴛʜɪs ᴘʀᴏᴄᴇss.</b>")
-        msg = await client.listen(query.from_user.id)
-        if msg.text == '/cancel':
-            await query.message.delete()
-            await query.message.reply("ᴄᴀɴᴄᴇʟᴇᴅ ᴛʜɪs ᴘʀᴏᴄᴇss...", reply_markup=InlineKeyboardMarkup(btn))
-            return
-        if msg.forward_from_chat and msg.forward_from_chat.type == enums.ChatType.CHANNEL: chat_id = msg.forward_from_chat.id
-        else:
-            await query.message.delete()
-            await query.message.reply('ɴᴏᴛ ꜰᴏʀᴡᴀʀᴅ ꜰʀᴏᴍ ᴄʜᴀɴɴᴇʟ', reply_markup=InlineKeyboardMarkup(btn))
-            return
-        await query.message.delete()
-        try:
-            chat = await client.get_chat(chat_id)
-            t = await client.send_message(chat.id, 'Test!')
-            await t.delete()
-        except Exception as e:
-            await query.message.reply(f'💔 sᴏᴍᴇᴛʜɪɴɢ ᴡᴇɴᴛ ᴡʀᴏɴɢ...\n\n<code>{e}</code>', reply_markup=InlineKeyboardMarkup(btn))
-            return
-        await db.update_user_info(int(user_id), {"log_channel": chat.id})
-        await query.message.reply(f"⚡️ sᴜᴄᴄᴇssꜰᴜʟʟʏ ᴀᴅᴅᴇᴅ ʏᴏᴜʀ ʟᴏɢ ᴄʜᴀɴɴᴇʟ - {chat.title}", reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        target_client = await resolve_target_client(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"log_channel_setgs#{sfx}"
+        bot_username = getattr(target_client, "username", None) or (await target_client.get_me()).username
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_log_channel",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            f"<b>Forward any message from your log channel to me.</b>\n"
+            f"Make sure @{bot_username} is an admin in that channel.\n\n"
+            f"Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
 
     elif query.data.startswith("log_channel_delete"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'log_channel_setgs#{user_id}')]]
-        settings = await db.get_user(int(user_id))
-        if settings['log_channel'] == "":
-            await query.answer("ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ ʟᴏɢ ᴄʜᴀɴɴᴇʟ.", show_alert=True)
-            return
-        await db.update_user_info(int(user_id), {"log_channel": ""})
-        await query.message.edit_text("sᴜᴄᴄᴇssꜰᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ ʏᴏᴜʀ ʟᴏɢ ᴄʜᴀɴɴᴇʟ ✅", reply_markup=InlineKeyboardMarkup(btn))
-		
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'log_channel_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        if not settings.get('log_channel'):
+            return await query.answer("You haven't added a log channel yet.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"log_channel": None})
+        await send_or_edit_text(query, "✅ Successfully deleted your log channel.", InlineKeyboardMarkup(btn))
+
     elif query.data.startswith("update_protect_mode"):
-        _, user_id = query.data.split("#")
-        settings = await db.get_user(int(user_id))
-        btn = [[InlineKeyboardButton('ᴛᴜʀɴ ᴏꜰꜰ ❌ ' if settings['protect_content'] else 'ᴛᴜʀɴ ᴏɴ ✅', callback_data=f"clone_files_mode#{user_id}#{settings['protect_content']}")],[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'settings#{user_id}')]]
-        mode = 'ᴛᴜʀɴ ᴏɴ ✅' if settings['protect_content'] else 'ᴛᴜʀɴ ᴏꜰꜰ ❌'
-        await query.message.edit(f"ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ʙᴏᴛ ɢɪᴠᴇɴ ꜰɪʟᴇꜱ ᴘʀᴏᴛᴇᴄᴛɪᴏɴ, ᴍᴇᴀɴꜱ ᴡʜᴇᴛʜᴇʀ ᴜꜱᴇʀꜱ ᴄᴀɴ ꜰᴏʀᴡᴀʀᴅ ʏᴏᴜʀ ꜰɪʟᴇ ᴏʀ ɴᴏᴛ....\n\nᴘʀᴏᴛᴇᴄᴛ:- {mode}", reply_markup=InlineKeyboardMarkup(btn))
-    
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        protect = bool(settings.get('protect_content', False))
+        btn = [
+            [InlineKeyboardButton('Turn OFF ❌' if protect else 'Turn ON ✅', callback_data=f"clone_files_mode#{target_uid}#{protect}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [InlineKeyboardButton('« Back', callback_data=f'settings#{sfx}')]
+        ]
+        mode = 'ON ✅' if protect else 'OFF ❌'
+        await send_or_edit_text(
+            query,
+            f"<b>🛡 Content Protection Settings</b>\n\nControl whether users can forward or save your files.\n\n<b>Current Status:</b> {mode}",
+            InlineKeyboardMarkup(btn),
+        )
+
     elif query.data.startswith("clone_files_mode"):
-        _, user_id, status = query.data.split("#")
-        if status == 'True': await db.update_user_info(int(user_id), {"protect_content": False})
-        else: await db.update_user_info(int(user_id), {"protect_content": True})
-        settings = await db.get_user(int(user_id))
-        btn = [[InlineKeyboardButton('ᴛᴜʀɴ ᴏꜰꜰ ❌ ' if settings['protect_content'] else 'ᴛᴜʀɴ ᴏɴ ✅', callback_data=f"clone_files_mode#{user_id}#{settings['protect_content']}")],[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'settings#{user_id}')]]
-        mode = 'ᴛᴜʀɴ ᴏɴ ✅' if settings['protect_content'] else 'ᴛᴜʀɴ ᴏꜰꜰ ❌'
-        await query.message.edit(f"ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ʙᴏᴛ ɢɪᴠᴇɴ ꜰɪʟᴇꜱ ᴘʀᴏᴛᴇᴄᴛɪᴏɴ, ᴍᴇᴀɴꜱ ᴡʜᴇᴛʜᴇʀ ᴜꜱᴇʀꜱ ᴄᴀɴ ꜰᴏʀᴡᴀʀᴅ ʏᴏᴜʀ ꜰɪʟᴇ ᴏʀ ɴᴏᴛ....\n\nᴘʀᴏᴛᴇᴄᴛ:- {mode}", reply_markup=InlineKeyboardMarkup(btn))
-    
+        target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        await cur_db.update_user_info(target_uid, {"protect_content": False if status == 'True' else True})
+        settings = await cur_db.get_user(target_uid)
+        protect = bool(settings.get('protect_content', False))
+        btn = [
+            [InlineKeyboardButton('Turn OFF ❌' if protect else 'Turn ON ✅', callback_data=f"clone_files_mode#{target_uid}#{protect}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [InlineKeyboardButton('« Back', callback_data=f'settings#{sfx}')]
+        ]
+        mode = 'ON ✅' if protect else 'OFF ❌'
+        await send_or_edit_text(
+            query,
+            f"<b>🛡 Content Protection Settings</b>\n\nControl whether users can forward or save your files.\n\n<b>Current Status:</b> {mode}",
+            InlineKeyboardMarkup(btn),
+        )
+
     elif query.data.startswith("tutorial_setgs"):
-        _, user_id = query.data.split("#")
-        settings = await db.get_user(int(user_id))
-        btn = [[
-            InlineKeyboardButton('sᴇᴛ ᴛᴜᴛᴏʀɪᴀʟ', callback_data=f'set_tutorial#{user_id}'),
-            InlineKeyboardButton('ᴅᴇʟᴇᴛᴇ ᴛᴜᴛᴏʀɪᴀʟ', callback_data=f'tutorial_delete#{user_id}')
-        ],[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'settings#{user_id}')]]
-        if settings['how_to_download'] == "": tutorial = "ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ ᴛᴜᴛᴏʀɪᴀʟ ʟɪɴᴋ..."
-        else: tutorial = f"ʟɪɴᴋ - {settings['how_to_download']}"
-        await query.message.edit(f"ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ʙᴏᴛ ᴛᴜᴛᴏʀɪᴀʟ ᴠɪᴅᴇᴏ ʟɪɴᴋ ꜰᴏʀ ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ ʟɪɴᴋ.\n\n{tutorial}", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        btn = [
+            [
+                InlineKeyboardButton('Set Tutorial', callback_data=f'set_tutorial#{sfx}'),
+                InlineKeyboardButton('Delete Tutorial', callback_data=f'tutorial_delete#{sfx}')
+            ],
+            [InlineKeyboardButton('« Back', callback_data=f'settings#{sfx}')]
+        ]
+        tutorial = f"Link: {settings['how_to_download']}" if settings.get('how_to_download') else "No tutorial link set yet."
+        await send_or_edit_text(
+            query,
+            f"<b>🎬 Tutorial Video Settings</b>\n\nManage your 'How to Open Link' tutorial URL.\n\n{tutorial}",
+            InlineKeyboardMarkup(btn),
+        )
 
     elif query.data.startswith("set_tutorial"):
-        _, user_id = query.data.split("#")
-        uid = int(user_id)		
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'tutorial_setgs#{user_id}')]]
-        await query.message.edit_text("sᴇɴᴅ ᴍᴇ ᴀ ᴛᴜᴛᴏʀɪᴀʟ ʟɪɴᴋ...\n\n/cancel - ᴄᴀɴᴄᴇʟ ᴛʜɪs ᴘʀᴏᴄᴇss.")
-        msg = await client.listen(query.from_user.id)
-        if msg.text == '/cancel':
-            await query.message.delete()
-            await query.message.reply("ᴄᴀɴᴄᴇʟʟᴇᴅ ᴛʜɪs ᴘʀᴏᴄᴇss...", reply_markup=InlineKeyboardMarkup(btn))
-            return
-        await db.update_user_info(int(user_id), {"how_to_download": msg.text})
-        await query.message.delete()
-        await query.message.reply("sᴜᴄᴄᴇssꜰᴜʟʟʏ sᴇᴛ ᴛᴜᴛᴏʀɪᴀʟ ʟɪɴᴋ ✅", reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"tutorial_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_tutorial",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "Send your tutorial video link.\n\nSend /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
 
     elif query.data.startswith("tutorial_delete"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'tutorial_setgs#{user_id}')]]
-        settings = await db.get_user(int(user_id))
-        if settings['how_to_download'] == "":
-            await query.answer("ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ ᴛᴜᴛᴏʀɪᴀʟ ʟɪɴᴋ", show_alert=True)
-            return
-        await db.update_user_info(int(user_id), {"how_to_download": ""})
-        await query.message.edit_text('⚠️ sᴜᴄᴄᴇssꜰᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ ᴛᴜᴛᴏʀɪᴀʟ ʟɪɴᴋ...', reply_markup=InlineKeyboardMarkup(btn))
-	
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'tutorial_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        if not settings.get('how_to_download'):
+            return await query.answer("You haven't added a tutorial link yet.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"how_to_download": None})
+        await send_or_edit_text(query, "🗑 Successfully deleted tutorial link.", InlineKeyboardMarkup(btn))
+
     elif query.data.startswith("verify_time_setgs"):
-        _, user_id = query.data.split("#")
-        settings = await db.get_user(int(user_id))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
         verify_time = settings.get("verify_expire", 0)
         btn = [
-            [InlineKeyboardButton("⏳ ꜱᴇᴛ ᴛɪᴍᴇ", callback_data=f"set_verify_time#{user_id}")],
-            [InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"verify_setgs#{user_id}")]
+            [InlineKeyboardButton("⏳ Set Time", callback_data=f"set_verify_time#{sfx}")],
+            [InlineKeyboardButton("« Back", callback_data=f"verify_setgs#{sfx}")]
         ]
-        await query.message.edit_text(
-            f"<b>Vᴇʀɪғɪᴄᴀᴛɪᴏɴ Tɪᴍᴇ Sᴇᴛᴛɪɴɢꜱ</b>\n\n"
-            f"⏰ Cᴜʀʀᴇɴᴛ Tɪᴍᴇ: <code>{verify_time if verify_time else 'Nᴏᴛ Sᴇᴛ'}</code> sec",
-            reply_markup=InlineKeyboardMarkup(btn)
+        await send_or_edit_text(
+            query,
+            f"<b>⏳ Verification Time Settings</b>\n\n"
+            f"⏰ Current Time: <code>{verify_time if verify_time else 'Not Set'}</code> sec",
+            InlineKeyboardMarkup(btn),
         )
 
     elif query.data.startswith("set_verify_time"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'verify_time_setgs#{user_id}')]]		
-        await query.message.edit_text(
-            "<b>Sᴇɴᴅ ᴍᴇ ᴀ ᴛɪᴍᴇ ʟɪᴋᴇ:</b>\n"
-            "`10m` → 10 minutes\n"
-            "`1h` → 1 hour\n"
-            "`30s` → 30 seconds\n\n"
-            "/cancel - ᴄᴀɴᴄᴇʟʟᴇᴅ ᴛʜɪs ᴘʀᴏᴄᴇss..."
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"verify_time_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_verify_time",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
         )
-        msg = await client.listen(int(user_id))
-        if msg.text == "/cancel":
-            await query.message.delete()
-            await query.message.reply("ᴄᴀɴᴄᴇʟʟᴇᴅ ᴛʜɪs ᴘʀᴏᴄᴇss...", reply_markup=InlineKeyboardMarkup(btn))
-            return
-        await query.message.delete() 			
-        try:
-            arg = msg.text.lower()
-            if arg.endswith("s"): seconds = int(arg[:-1])
-            elif arg.endswith("m"): seconds = int(arg[:-1]) * 60
-            elif arg.endswith("h"): seconds = int(arg[:-1]) * 3600
-            elif arg.endswith("d"): seconds = int(arg[:-1]) * 86400
-            else: seconds = int(arg)
-        except: return await query.message.reply("❌ Iɴᴠᴀʟɪᴅ ғᴏʀᴍᴀᴛ. Exᴀᴍᴘʟᴇ: 10m or 2h", quote=True)
-        await query.message.delete()
-        await db.update_user_info(int(user_id), {"verify_expire": seconds})
-        await query.message.reply(f"✅ Vᴇʀɪғɪᴄᴀᴛɪᴏɴ ᴛɪᴍᴇ ᴜᴘᴅᴀᴛᴇᴅ ᴛᴏ <b>{seconds} ꜱᴇᴄᴏɴᴅꜱ</b>", reply_markup=InlineKeyboardMarkup(btn))
-		
+        await send_or_edit_text(
+            query,
+            "<b>Send verification duration like:</b>\n"
+            "<code>10m</code> → 10 minutes\n"
+            "<code>1h</code> → 1 hour\n"
+            "<code>30s</code> → 30 seconds\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
     elif query.data.startswith("verify_setgs"):
-        _, user_id = query.data.split("#")
-        settings = await db.get_user(int(user_id))
-        btn = [[
-			InlineKeyboardButton('ᴏꜰꜰ ᴠᴇʀɪꜰʏ' if settings['verify'] else 'ᴏɴ ᴠᴇʀɪꜰʏ', callback_data=f"update_verify#{user_id}#{settings['verify']}")
-        ],[
-            InlineKeyboardButton('sᴇᴛ ᴠᴇʀɪꜰʏ ', callback_data=f'set_verify#{user_id}'),
-            InlineKeyboardButton('ᴅᴇʟᴇᴛᴇ ᴠᴇʀɪꜰʏ ', callback_data=f'verify_delete#{user_id}')
-		],[InlineKeyboardButton("ꜱᴇᴛ ᴠᴇʀɪғʏ ᴛɪᴍᴇ", callback_data=f"verify_time_setgs#{user_id}")],[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'settings#{user_id}')]]
-        verify_status = 'ᴏɴ ✅' if settings['verify'] else 'ᴏꜰꜰ ❌'
-        if settings['verify_api'] == "": api_url = "ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ ᴠᴇʀɪꜰʏ"
-        else: api_url = f"ᴜʀʟ - <code>{settings['verify_site']}</code>\nᴀᴘɪ - <code>{settings['verify_api']}</code>"
-        await query.message.edit(f"<b>ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ʙᴏᴛ ᴠᴇʀɪꜰʏ ᴡɪᴛʜ ɢɪᴠᴇɴ ꜰɪʟᴇs.\n\nᴠᴇʀɪꜰʏ - {verify_status}\n\n{api_url}</b>", reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        verify = bool(settings.get('verify', False))
+        btn = [
+            [InlineKeyboardButton('Disable Verify ❌' if verify else 'Enable Verify ✅', callback_data=f"update_verify#{target_uid}#{verify}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [
+                InlineKeyboardButton('Set Verify', callback_data=f'set_verify#{sfx}'),
+                InlineKeyboardButton('Delete Verify', callback_data=f'verify_delete#{sfx}')
+            ],
+            [InlineKeyboardButton("⏳ Set Verify Time", callback_data=f"verify_time_setgs#{sfx}")],
+            [InlineKeyboardButton('« Back', callback_data=f'settings#{sfx}')]
+        ]
+        verify_status = 'ON ✅' if verify else 'OFF ❌'
+        if not settings.get('verify_api'):
+            api_url = "No verification shortener configured."
+        else:
+            api_url = f"URL: <code>{settings['verify_site']}</code>\nAPI: <code>{settings['verify_api']}</code>"
+        await send_or_edit_text(
+            query,
+            f"<b>✅ Verification Settings</b>\n\nStatus: {verify_status}\n\n{api_url}",
+            InlineKeyboardMarkup(btn),
+        )
 
     elif query.data.startswith("set_verify"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'verify_setgs#{user_id}')]]
-        await query.message.edit_text("<b>sᴇɴᴅ ᴍᴇ ᴀ ᴠᴇʀɪꜰʏ ᴜʀʟ...\n\n/cancel - ᴄᴀɴᴄᴇʟ ᴛʜɪs ᴘʀᴏᴄᴇss.</b>")
-        url_msg = await client.listen(query.from_user.id)
-        url = url_msg.text
-        if url_msg.text == '/cancel':
-            await query.message.delete()
-            await query.message.reply("ᴄᴀɴᴄᴇʟʟᴇᴅ ᴛʜɪs ᴘʀᴏᴄᴇss...", reply_markup=InlineKeyboardMarkup(btn))
-            return
-        await query.message.delete()
-        a = await query.message.reply("sᴇɴᴅ ᴍᴇ ᴠᴇʀɪꜰʏ ᴀᴘɪ...")
-        api_msg = await client.listen(query.from_user.id)
-        api = api_msg.text
-        await db.update_user_info(int(user_id), {"verify_site": url, "verify_api": api, "verify": True})
-        await a.delete()
-        await query.message.reply("sᴜᴄᴄᴇssꜰᴜʟʟʏ sᴇᴛ ᴠᴇʀɪꜰʏ ✅", reply_markup=InlineKeyboardMarkup(btn))
-
-    # In plugins/callback.py
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"verify_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_verify_url",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "<b>Send your Verify Shortener URL/Domain...</b>\n\nSend /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
 
     elif query.data.startswith("update_verify"):
-        _, user_id, status = query.data.split("#")
-        settings = await db.get_user(int(user_id))
+        target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
 
-        # --- নতুন যুক্তি (New Logic) শুরু ---
-        # যদি ব্যবহারকারী ভেরিফিকেশন 'অন' করতে চায় (অর্থাৎ বর্তমান স্ট্যাটাস 'False')
         if status == 'False':
-            # চেক করো URL এবং API সেট করা আছে কিনা
             if not settings.get("verify_api") or not settings.get("verify_site"):
-                await query.answer(
-                    "⚠️ ᴘʟᴇᴀsᴇ sᴇᴛ ᴠᴇʀɪꜰʏ ᴜʀʟ ᴀɴᴅ ᴀᴘɪ ꜰɪʀsᴛ!",
-                    show_alert=True
-                )
-                return  # 여기서 코드 실행을 멈춥니다.
+                return await query.answer("⚠️ Please set Verify URL and API first!", show_alert=True)
 
-        # --- নতুন যুক্তি শেষ ---
+        await cur_db.update_user_info(target_uid, {"verify": False if status == 'True' else True})
+        settings = await cur_db.get_user(target_uid)
+        verify = bool(settings.get('verify', False))
+        btn = [
+            [InlineKeyboardButton('Disable Verify ❌' if verify else 'Enable Verify ✅', callback_data=f"update_verify#{target_uid}#{verify}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [
+                InlineKeyboardButton('Set Verify', callback_data=f'set_verify#{sfx}'),
+                InlineKeyboardButton('Delete Verify', callback_data=f'verify_delete#{sfx}')
+            ],
+            [InlineKeyboardButton("⏳ Set Verify Time", callback_data=f"verify_time_setgs#{sfx}")],
+            [InlineKeyboardButton('« Back', callback_data=f'settings#{sfx}')]
+        ]
+        verify_status = 'ON ✅' if verify else 'OFF ❌'
+        await send_or_edit_text(
+            query,
+            f"<b>✅ Verification Settings</b>\n\nStatus: {verify_status}\n\nURL: <code>{settings.get('verify_site')}</code>\nAPI: <code>{settings.get('verify_api')}</code>",
+            InlineKeyboardMarkup(btn),
+        )
 
-        # যদি উপরের শর্ত পূরণ হয় (বা ব্যবহারকারী 'অফ' করতে চায়), তাহলে স্ট্যাটাস আপডেট করো
-        if status == 'True':
-            await db.update_user_info(int(user_id), {"verify": False})
-        else:
-            await db.update_user_info(int(user_id), {"verify": True})
-
-        # মেসেজ এবং বাটন পুনরায় তৈরি করে দেখাও
-        settings = await db.get_user(int(user_id))
-        btn = [[
-			InlineKeyboardButton('ᴏꜰꜰ ᴠᴇʀɪꜰʏ' if settings['verify'] else 'ᴏɴ ᴠᴇʀɪꜰʏ', callback_data=f"update_verify#{user_id}#{settings['verify']}")
-        ],[
-            InlineKeyboardButton('sᴇᴛ ᴠᴇʀɪꜰʏ ', callback_data=f'set_verify#{user_id}'),
-            InlineKeyboardButton('ᴅᴇʟᴇᴛᴇ ᴠᴇʀɪꜰʏ ', callback_data=f'verify_delete#{user_id}')
-		],[InlineKeyboardButton("ꜱᴇᴛ ᴠᴇʀɪғʏ ᴛɪᴍᴇ", callback_data=f"verify_time_setgs#{user_id}")],[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'settings#{user_id}')]]
-        verify_status = 'ᴏɴ ✅' if settings['verify'] else 'ᴏꜰꜰ ❌'
-        await query.message.edit(f"<b>ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ʙᴏᴛ ᴠᴇʀɪꜰʏ ᴡɪᴛʜ ɢɪᴠᴇɴ ꜰɪʟᴇs.\n\nᴠᴇʀɪꜰʏ - {verify_status}\n\nᴜʀʟ - <code>{settings['verify_site']}</code>\nᴀᴘɪ - <code>{settings['verify_api']}</code></b>", reply_markup=InlineKeyboardMarkup(btn))
-		
     elif query.data.startswith("verify_delete"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'verify_setgs#{user_id}')]]
-        settings = await db.get_user(int(user_id))
-        if settings['verify_api'] == "":
-            await query.answer("⚠️ ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ ᴠᴇʀɪꜰʏ...", show_alert=True)
-            return
-        await db.update_user_info(int(user_id), {"verify": False, "verify_api": None, "verify_site": None})
-        await query.message.edit_text("🗑 sᴜᴄᴄᴇssꜰᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ ᴠᴇʀɪꜰʏ...", reply_markup=InlineKeyboardMarkup(btn))
-	
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'verify_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        if not settings.get('verify_api'):
+            return await query.answer("⚠️ No verification shortener is configured.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"verify": False, "verify_api": None, "verify_site": None})
+        await send_or_edit_text(query, "🗑 Successfully deleted verification settings.", InlineKeyboardMarkup(btn))
+
     elif query.data.startswith("shortlink_setgs"):
-        _, user_id = query.data.split("#")
-        settings = await db.get_user(int(user_id))
-        btn = [[
-            InlineKeyboardButton('sᴇᴛ sʜᴏʀᴛʟɪɴᴋ', callback_data=f'set_shortlink#{user_id}'),
-            InlineKeyboardButton('ᴅᴇʟᴇᴛᴇ sʜᴏʀᴛʟɪɴᴋ ', callback_data=f'shortlink_delete#{user_id}')
-        ],[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'settings#{user_id}')]]
-        if settings['shortener_api'] == "": api_url = "ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ sʜᴏʀᴛʟɪɴᴋ"
-        else: api_url = f"ᴜʀʟ - <code>{settings['base_site']}</code>\nᴀᴘɪ - <code>{settings['shortener_api']}</code>"
-        await query.message.edit(f"<b>ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ʙᴏᴛ sʜᴏʀᴛʟɪɴᴋ ᴡɪᴛʜ ɢɪᴠᴇɴ ꜰɪʟᴇs.\n\n{api_url}</b>", reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        btn = [
+            [
+                InlineKeyboardButton('Set Shortlink', callback_data=f'set_shortlink#{sfx}'),
+                InlineKeyboardButton('Delete Shortlink', callback_data=f'shortlink_delete#{sfx}')
+            ],
+            [InlineKeyboardButton('« Back', callback_data=f'settings#{sfx}')]
+        ]
+        if not settings.get('shortener_api'):
+            api_url = "No shortlink configured."
+        else:
+            api_url = f"URL: <code>{settings['base_site']}</code>\nAPI: <code>{settings['shortener_api']}</code>"
+        await send_or_edit_text(
+            query,
+            f"<b>🔗 Shortener Settings</b>\n\n{api_url}",
+            InlineKeyboardMarkup(btn),
+        )
 
     elif query.data.startswith("set_shortlink"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'shortlink_setgs#{user_id}')]]
-        await query.message.edit_text("<b>sᴇɴᴅ ᴍᴇ ᴀ sʜᴏʀᴛʟɪɴᴋ ᴜʀʟ...\n\n/cancel - ᴄᴀɴᴄᴇʟ ᴛʜɪs ᴘʀᴏᴄᴇss.</b>")
-        url_msg = await client.listen(query.from_user.id)
-        url = url_msg.text
-        if url_msg.text == '/cancel':
-            await query.message.delete()
-            await query.message.reply("ᴄᴀɴᴄᴇʟʟᴇᴅ ᴛʜɪs ᴘʀᴏᴄᴇss...", reply_markup=InlineKeyboardMarkup(btn))
-            return
-        await query.message.delete()
-        a = await query.message.reply("sᴇɴᴅ ᴍᴇ sʜᴏʀᴛʟɪɴᴋ ᴀᴘɪ...")
-        api_msg = await client.listen(query.from_user.id)
-        api = api_msg.text
-        await db.update_user_info(int(user_id), {"base_site": url, "shortener_api": api})
-        await a.delete()
-        await query.message.reply("sᴜᴄᴄᴇssꜰᴜʟʟʏ sᴇᴛ sʜᴏʀᴛʟɪɴᴋ ✅", reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"shortlink_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_shortlink_url",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "<b>Send your Shortener URL/Domain...</b>\n\nSend /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
 
     elif query.data.startswith("shortlink_delete"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton('≼ ʙᴀᴄᴋ', callback_data=f'shortlink_setgs#{user_id}')]]
-        settings = await db.get_user(int(user_id))
-        if settings['shortener_api'] == "":
-            await query.answer("⚠️ ʏᴏᴜ ᴅɪᴅɴ'ᴛ ᴀᴅᴅᴇᴅ ᴀɴʏ sʜᴏʀᴛʟɪɴᴋ...", show_alert=True)
-            return
-        await db.update_user_info(int(user_id), {"base_site": "", "shortener_api": ""})
-        await query.message.edit_text("🗑 sᴜᴄᴄᴇssꜰᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ sʜᴏʀᴛʟɪɴᴋ...!", reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'shortlink_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        if not settings.get('shortener_api'):
+            return await query.answer("⚠️ No shortlink is configured.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"base_site": None, "shortener_api": None})
+        await send_or_edit_text(query, "🗑 Successfully deleted shortlink!", InlineKeyboardMarkup(btn))
 
     elif query.data.startswith("caption_setgs"):
-        _, user_id = query.data.split("#")
-        user = await db.get_user(int(user_id))
-        caption = user.get("custom_caption", "ɴᴏᴛ ꜱᴇᴛ!")
-        btn = [[
-            InlineKeyboardButton("📝 sᴇᴛ ᴄᴀᴘᴛɪᴏɴ", callback_data=f"set_caption#{user_id}")
-		],[InlineKeyboardButton("♻️ ᴅᴇꜰᴀᴜʟᴛ ᴄᴀᴘᴛɪᴏɴ", callback_data=f"default_caption#{user_id}")],[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"settings#{user_id}")]]
-        await query.message.edit(f"**📝 ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ʙᴏᴛ ɢɪᴠᴇɴ ꜰɪʟᴇ ᴄᴀᴘᴛɪᴏɴ.\n\n**📌 ꜰɪʟᴇ ᴄᴀᴘᴛɪᴏɴ -:`{caption}`", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        user = await cur_db.get_user(target_uid)
+        caption = user.get("custom_caption") or "Not Set"
+        btn = [
+            [InlineKeyboardButton("📝 Set Caption", callback_data=f"set_caption#{sfx}")],
+            [InlineKeyboardButton("♻️ Default Caption", callback_data=f"default_caption#{sfx}")],
+            [InlineKeyboardButton("« Back", callback_data=f"settings#{sfx}")]
+        ]
+        await send_or_edit_text(
+            query,
+            f"<b>📝 File Caption Settings</b>\n\n<b>Current Caption:</b>\n<code>{caption}</code>",
+            InlineKeyboardMarkup(btn),
+        )
 
     elif query.data.startswith("default_caption"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"caption_setgs#{user_id}")]]
-        await db.update_user_info(int(user_id), {"custom_caption": ""})
-        await query.message.edit_text("✅ sᴜᴄᴄᴇssꜰᴜʟʟʏ sᴇᴛ ᴛᴏ ᴅᴇꜰᴀᴜʟᴛ ꜰɪʟᴇ ᴄᴀᴘᴛɪᴏɴ....", reply_markup=InlineKeyboardMarkup(btn))
-        
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton("« Back", callback_data=f"caption_setgs#{sfx}")]]
+        await cur_db.update_user_info(target_uid, {"custom_caption": None})
+        await send_or_edit_text(query, "✅ Reset to default file caption.", InlineKeyboardMarkup(btn))
+
     elif query.data.startswith("set_caption"):
-        _, user_id = query.data.split("#")
-        btn = [[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"caption_setgs#{user_id}")]]
-        await query.message.edit_text("✍️ sᴇɴᴅ ᴍᴇ ᴀ ꜰɪʟᴇ ᴄᴀᴘᴛɪᴏɴ.\n\nᴀᴠᴀɪʟᴀʙʟᴇ ꜰɪʟʟɪɴɢ:-\n`{file_name}` - File name\n`{file_size}` - File size\n\n/cancel - ᴄᴀɴᴄᴇʟ ᴛʜɪs ᴘʀᴏᴄᴇss.")
-        msg = await client.listen(query.from_user.id)
-        if msg.text == "/cancel":
-            await query.message.delete()
-            await query.message.reply("❌ ᴄᴀɴᴄᴇʟʟᴇᴅ ᴛʜɪs ᴘʀᴏᴄᴇss...!", reply_markup=InlineKeyboardMarkup(btn))
-            return
-        try: msg.text.format(file_name='file_name', file_size='file_size')
-        except Exception as e:
-            await query.message.delete()
-            await query.message.reply(f'ᴡʀᴏɴɢ ꜰᴏʀᴍᴀᴛ <code>{e}</code> ᴜsᴇᴅ...', reply_markup=InlineKeyboardMarkup(btn))
-            return
-        await db.update_user_info(int(user_id), {"custom_caption": msg.text})
-        await query.message.delete()
-        await query.message.reply(f"✅ sᴜᴄᴄᴇssꜰᴜʟʟʏ sᴇᴛ ꜰɪʟᴇ ᴄᴀᴘᴛɪᴏɴ -\n\n{msg.text}", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(btn))
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"caption_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_caption",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "✍️ Send your custom file caption.\n\n"
+            "Available placeholders:\n"
+            "• <code>{file_name}</code> — File name\n"
+            "• <code>{file_size}</code> — File size\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
 
     elif query.data.startswith("settings"):
-        _, user_id = query.data.split("#")
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+
+        title = "<b>⚙️ Settings Menu</b>"
+        if clone_bot_id:
+            clone_doc = await clone_db.get_clone(clone_bot_id)
+            if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+                return await query.answer("⚠️ Access denied!", show_alert=True)
+            title = f"<b>⚙️ Clone Bot Settings (@{clone_doc.get('bot_username')})</b>"
+
         buttons = [
-            [InlineKeyboardButton("📝 Cᴀᴘᴛɪᴏɴ Sᴇᴛᴛɪɴɢꜱ", callback_data=f"caption_setgs#{user_id}")],
-            [InlineKeyboardButton("🔗 Sᴇᴛ Sʜᴏʀᴛᴇɴᴇʀ",    callback_data=f"shortlink_setgs#{user_id}")],
-            [InlineKeyboardButton("✅ Vᴇʀɪғʏ Sᴇᴛᴛɪɴɢꜱ",  callback_data=f"verify_setgs#{user_id}")],
-            [InlineKeyboardButton("🔗 Pᴇʀᴍᴀɴᴇɴᴛ Lɪɴᴋ", callback_data=f"permanent_link_setgs#{user_id}")],
-            [InlineKeyboardButton("🎬 Tᴜᴛᴏʀɪᴀʟ Sᴇᴛᴛɪɴɢꜱ",callback_data=f"tutorial_setgs#{user_id}")],
-            [InlineKeyboardButton("🛡 Pʀᴏᴛᴇᴄᴛ Sᴇᴛᴛɪɴɢꜱ", callback_data=f"update_protect_mode#{user_id}")],
-            [InlineKeyboardButton("📢 Fᴏʀᴄᴇ Sᴜʙꜱᴄʀɪʙᴇ ", callback_data=f"force_channel_setgs#{user_id}")],
-            [InlineKeyboardButton("📢 Lᴏɢ Cʜᴀɴɴᴇʟ",      callback_data=f"log_channel_setgs#{user_id}")],
-            [InlineKeyboardButton("📑 Mʏ Dᴇᴛᴀɪʟꜱ", callback_data=f"user_details#{user_id}")]
+            [InlineKeyboardButton("📝 Caption Settings", callback_data=f"caption_setgs#{sfx}")],
+            [InlineKeyboardButton("🔗 Set Shortener", callback_data=f"shortlink_setgs#{sfx}")],
+            [InlineKeyboardButton("✅ Verify Settings", callback_data=f"verify_setgs#{sfx}")],
+            [InlineKeyboardButton("🔗 Permanent Link", callback_data=f"permanent_link_setgs#{sfx}")],
+            [InlineKeyboardButton("🎬 Tutorial Settings", callback_data=f"tutorial_setgs#{sfx}")],
+            [InlineKeyboardButton("🛡 Protect Settings", callback_data=f"update_protect_mode#{sfx}")],
+            [InlineKeyboardButton("📢 Force Subscribe", callback_data=f"force_channel_setgs#{sfx}")],
+            [InlineKeyboardButton("📢 Log Channel", callback_data=f"log_channel_setgs#{sfx}")],
+            [InlineKeyboardButton("📑 My Details", callback_data=f"user_details#{sfx}")],
         ]
-        await query.message.edit_text("**⚙️ ꜱᴇᴛᴛɪɴɢꜱ ᴍᴇɴᴜ:\n\nsᴇʟᴇᴄᴛ ᴀɴ ᴏᴘᴛɪᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴄᴜsᴛᴏᴍɪᴢᴇ ʏᴏᴜʀ ꜰɪʟᴇs sᴇᴛᴛɪɴɢs:",reply_markup=InlineKeyboardMarkup(buttons))
+        if clone_bot_id:
+            buttons.append([InlineKeyboardButton("« Back to Clone Panel", callback_data=f"manage_clone#{clone_bot_id}")])
 
-    # ============================================================
-    # ✨✨✨  CLONE MODE  ✨✨✨
-    # এই অংশটা শুধু মূল বটেই কাজ করার কথা (ক্লোন বটে এই বাটন এলে
-    # সরাসরি URL দিয়ে মূল বটে পাঠিয়ে দেওয়া হয়, callback_data না)।
-    # ============================================================
-
-    elif query.data == "create_clone":
-        owner_id = query.from_user.id
-
-        existing = await clone_db.get_user_clone(owner_id)
-        if existing:
-            return await show_manage_clone_panel(query, existing)
-
-        clone_count = await clone_db.get_user_clones_count(owner_id)
-        if clone_count >= MAX_CLONE_PER_USER:
-            return await query.answer(
-                "⚠️ ᴀᴘɴᴀʀ ᴀɢᴇ ᴛʜᴇᴋᴇɪ ᴇᴋᴛᴀ ᴄʟᴏɴᴇ ᴀᴄᴇ, ɴᴏᴛᴜɴ ᴋʀᴇᴀᴛᴇ ᴋᴏʀᴛᴇ ᴘᴀᴀʀᴇɪ ɴᴀ!",
-                show_alert=True
-            )
-
-        cancel_btn = InlineKeyboardMarkup([[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data="start")]])
-        await query.message.edit_text(
-            "<b>✨ Cʀᴇᴀᴛᴇ Yᴏᴜʀ Oᴡɴ Cʟᴏɴᴇ Bᴏᴛ</b>\n\n"
-            "1️⃣ @BotFather ᴇ ɢɪʏᴇ /newbot ᴅɪʏᴇ ᴇᴋᴛᴀ ɴᴛᴜɴ ʙᴏᴛ ʙᴀɴᴀɴ\n"
-            "2️⃣ BotFather ᴛʜᴇᴋᴇ ᴘᴀᴏʏᴀ ᴛᴏᴋᴇɴ ᴛᴀ ᴇɪ ᴄʜᴀᴛᴇ ᴘᴀᴛʜɪʏᴇ ᴅɪɴ\n\n"
-            "/cancel - ᴛʜɪꜱ ᴘʀᴏᴄᴇꜱꜱ ᴋᴀɴᴄᴇʟ ᴋᴏʀᴛᴇ।",
-            reply_markup=cancel_btn
-        )
-
-        token_msg = await client.listen(owner_id)
-        if token_msg.text == "/cancel":
-            return await token_msg.reply("❌ ᴋᴀɴᴄᴇʟᴅ!", reply_markup=cancel_btn)
-
-        token = (token_msg.text or "").strip()
-        if not re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", token):
-            return await token_msg.reply(
-                "❌ ᴇᴛᴀ ᴇᴋᴛᴀ ᴠᴀʟɪᴅ ʙᴏᴛ ᴛᴏᴋᴇɴ ɴᴀ। @BotFather ᴛʜᴇᴋᴇ ᴘᴀᴏʏᴀ ᴛᴏᴋᴇɴ ᴛᴀ ᴀᴀʙᴀʀ ᴘᴀᴛʜᴀɴ, ᴀᴛʜᴀʙᴀ /start ᴅɪʏᴇ ᴀᴀʙᴀʀ ᴛʀʏ ᴋᴏʀᴜɴ।",
-                reply_markup=cancel_btn
-            )
-
-        wait_msg = await token_msg.reply("<i>⏳ ᴛᴏᴋᴇɴ ᴠᴇʀɪꜰʏ ᴋᴏʀᴇ ᴀᴘɴᴀʀ ᴄʟᴏɴᴇ ᴛᴇʀɪ ᴋᴏʀᴀ ʜᴏᴄᴄʜᴇ, ᴀᴇᴋᴛᴜ ᴀᴘᴇᴋᴋʜᴀ ᴋᴏʀᴜɴ...</i>")
-        try:
-            me = await start_clone(token, owner_id)
-        except Exception as e:
-            return await wait_msg.edit(
-                f"❌ ᴄʟᴏɴᴇ ᴛᴇʀɪ ᴋᴏʀᴀ ᴊᴀʏɴɪ।\n\n<code>{e}</code>\n\nᴛᴏᴋᴇɴ ᴛᴀ ᴄʜᴇᴋ ᴋᴏʀᴇ ᴀᴀʙᴀʀ /start ᴅɪʏᴇ ᴛʀʏ ᴋᴏʀᴜɴ।",
-                reply_markup=cancel_btn
-            )
-
-        await wait_msg.edit(
-            f"✨ <b>Sᴜᴄᴄᴇssꜰᴜʟʟʏ Cʟᴏɴᴇᴅ Yᴏᴜʀ Bᴏᴛ!</b>\n\n"
-            f"🤖 ʙᴏᴛ: @{me.username}\n\n"
-            f"ᴇᴋʜᴏɴ @{me.username} ᴇ ɢɪʏᴇ /start ᴅɪɴ, ᴏᴛᴀᴏ ᴀᴘɴᴀʀ ɴɪᴊᴇʀ ꜰɪʟᴇ ꜱᴛᴏʀ ʙᴏᴛ!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data="start")]])
-        )
-
-    elif query.data.startswith("manage_clone#"):
-        bot_id = int(query.data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or clone_doc["owner_id"] != user_id:
-            return await query.answer("⚠️ ᴇᴛᴀ ᴀᴘɴᴀʀ ᴄʟᴏɴ ɴᴀ।", show_alert=True)
-        return await show_manage_clone_panel(query, clone_doc)
-
-    elif query.data.startswith("clone_setpic#"):
-        bot_id = int(query.data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or clone_doc["owner_id"] != user_id:
-            return await query.answer("⚠️ ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ!", show_alert=True)
-
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"manage_clone#{bot_id}")]])
-        await query.message.edit_text(
-            "<b>🖼 ᴇᴋᴛᴀ ᴘʜᴏᴛᴏ ᴘᴀᴛʜᴀɴ</b>, ᴇᴛᴀ ᴀᴘɴᴀʀ ᴄʟᴏɴ ʙᴏᴛᴇʀ ꜱᴛᴀʀᴛ ᴍᴇꜱᴇᴊ ᴇ ᴅᴇᴋʜᴀʙᴇ।\n\n/cancel - ᴋᴀɴᴄᴇʟ ᴋᴏʀᴛᴇ।",
-            reply_markup=back_btn
-        )
-        pic_msg = await client.listen(user_id)
-        if pic_msg.text == "/cancel":
-            clone_doc = await clone_db.get_clone(bot_id)
-            return await show_manage_clone_panel(query, clone_doc)
-        if not pic_msg.photo:
-            return await pic_msg.reply("❌ ꜱʜᴜᴅᴜ ᴇᴋᴛᴀ ᴠᴀʟɪᴅ ᴘʜᴏᴛᴏ ᴘᴀᴛʜᴀɴ।", reply_markup=back_btn)
-
-        file_id = pic_msg.photo.file_id
-        await clone_db.update_clone_settings(bot_id, {"start_pic": file_id})
-        running = RUNNING_CLONES.get(bot_id)
-        if running:
-            running.custom_start_pic = file_id   # ✅ রিস্টার্ট ছাড়াই তাৎক্ষণিক লাইভ আপডেট
-
-        await pic_msg.reply("✅ ꜱᴛᴀʀᴛ ᴘɪᴄᴛᴜʀᴇ ᴀᴘᴅᴇᴛᴇᴅ!")
-        clone_doc = await clone_db.get_clone(bot_id)
-        return await show_manage_clone_panel(query, clone_doc)
-
-    elif query.data.startswith("clone_setmsg#"):
-        bot_id = int(query.data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or clone_doc["owner_id"] != user_id:
-            return await query.answer("⚠️ ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ!", show_alert=True)
-
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data=f"manage_clone#{bot_id}")]])
-        await query.message.edit_text(
-            "<b>📝 ᴇᴋᴛᴀ ꜱᴛᴀʀᴛ ᴍᴇꜱᴇᴊ ᴘᴀᴛʜᴀɴ</b> (HTML ꜰᴏʀᴍᴀᴛ ᴄᴏʟᴇ)।\n\n"
-            "ᴄᴀᴇᴌᴇ {} ʙᴀʙᴏʜᴀʀ ᴋᴏʀᴛᴇ ᴘᴀᴀʀᴇɴ, ᴇᴛᴀᴛᴇ ᴊᴇ ɪᴜᴊᴀʀ ʙᴏᴛ ꜱᴛᴀʀᴛ ᴋᴏʀᴇᴄʜᴇ ᴛᴀᴀᴋᴇ ᴛᴀɢ ᴋᴏʀᴀ ʜᴏʙᴇ।\n\n"
-            "/cancel - ᴋᴀɴᴄᴇʟ ᴋᴏʀᴛᴇ।",
-            reply_markup=back_btn
-        )
-        msg_msg = await client.listen(user_id)
-        if msg_msg.text == "/cancel":
-            clone_doc = await clone_db.get_clone(bot_id)
-            return await show_manage_clone_panel(query, clone_doc)
-
-        await clone_db.update_clone_settings(bot_id, {"start_msg": msg_msg.text})
-        running = RUNNING_CLONES.get(bot_id)
-        if running:
-            running.custom_start_txt = msg_msg.text   # ✅ লাইভ আপডেট
-
-        await msg_msg.reply("✅ ꜱᴛᴀʀᴛ ᴍᴇꜱᴇᴊ ᴀᴘᴅᴇᴛᴇᴅ!")
-        clone_doc = await clone_db.get_clone(bot_id)
-        return await show_manage_clone_panel(query, clone_doc)
-
-    elif query.data.startswith("clone_toggle#"):
-        bot_id = int(query.data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or clone_doc["owner_id"] != user_id:
-            return await query.answer("⚠️ ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ!", show_alert=True)
-
-        if clone_doc["status"] == "active":
-            await stop_clone(bot_id)
-            await clone_db.set_status(bot_id, "inactive")
-            await query.answer("⛔ ᴄʟᴏɴ ᴅᴇᴀᴄᴛɪᴠᴇᴛ ᴋᴏʀᴀ ʜᴏʏᴇᴄʜᴇ।")
-        else:
-            try:
-                await start_clone(clone_doc["bot_token"], user_id)
-                await query.answer("✅ ᴄʟᴏɴ ᴀᴄᴛɪᴠᴇᴛ ᴋᴏʀᴀ ʜᴏʏᴇᴄʜᴇ।")
-            except Exception as e:
-                return await query.answer(f"❌ {e}", show_alert=True)
-
-        clone_doc = await clone_db.get_clone(bot_id)
-        return await show_manage_clone_panel(query, clone_doc)
-
-    elif query.data.startswith("clone_restart#"):
-        bot_id = int(query.data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or clone_doc["owner_id"] != user_id:
-            return await query.answer("⚠️ ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ!", show_alert=True)
-
-        await query.answer("♻️ ʀᴇꜱᴛᴀʀᴛɪɴɢ...")
-        try:
-            await restart_clone(bot_id)
-        except Exception as e:
-            return await query.message.edit(f"❌ ʀᴇꜱᴛᴀʀᴛ ꜰᴇɪʟᴇᴅ: <code>{e}</code>")
-
-        clone_doc = await clone_db.get_clone(bot_id)
-        return await show_manage_clone_panel(query, clone_doc)
-
-    elif query.data.startswith("clone_delete_confirm#"):
-        bot_id = int(query.data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or clone_doc["owner_id"] != user_id:
-            return await query.answer("⚠️ ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ!", show_alert=True)
-
-        await delete_clone(bot_id)
-        await query.message.edit_text(
-            "✅ ᴀᴘɴᴀʀ ᴄʟᴏɴ ᴇʙᴀᴍ ᴛᴀʀ ꜱᴀᴋᴏʟ ᴅᴀᴛᴀ ᴅᴇʟᴇᴛᴇ ᴋᴏʀᴀ ʜᴏʏᴇᴄʜᴇ।",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("≼ ʙᴀᴄᴋ", callback_data="start")]])
-        )
-
-    elif query.data.startswith("clone_delete#"):
-        bot_id = int(query.data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or clone_doc["owner_id"] != user_id:
-            return await query.answer("⚠️ ᴀᴄᴄᴇꜱꜱ ᴅᴇɴɪᴇᴅ!", show_alert=True)
-
-        btn = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ ʜ্যাঁ, ᴅᴇʟᴇᴛᴇ ᴋᴏʀᴏ", callback_data=f"clone_delete_confirm#{bot_id}"),
-            InlineKeyboardButton("❌ ɴᴀ", callback_data=f"manage_clone#{bot_id}")
-        ]])
-        await query.message.edit_text(
-            "⚠️ <b>ᴀᴘɴɪ ᴋɪ ꜱᴛᴛɪ ᴇᴛᴀ ᴅᴇʟᴇᴛᴇ ᴋᴏʀᴛᴇ ᴄᴀɴ?</b>\n\n"
-            "ᴇᴛᴀᴛᴇ ᴀᴘɴᴀʀ ᴄʟᴏɴ ʙᴏᴛ ʙᴀᴄᴏɴᴅ ʜᴏʏᴇ ᴊᴀʙᴇ ᴇʙᴀᴍ ᴛᴀʀ ꜱᴀᴋᴏʟ ꜰɪʟᴇ/ɪᴜᴊᴀʀ ᴅᴀᴛᴀ ᴄɪʀᴏᴛᴏʀᴇʀ ᴊɴᴏ ᴍᴜᴄᴇ ᴊᴀʙᴇ, ᴋᴋʜᴏɴᴏ ꜰᴇʀᴀᴛ ᴘᴀᴀʙᴇɴ ɴᴀ।",
-            reply_markup=btn
+        await send_or_edit_text(
+            query,
+            f"{title}\n\nSelect an option below to customize your file settings:",
+            InlineKeyboardMarkup(buttons),
         )
