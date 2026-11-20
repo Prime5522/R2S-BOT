@@ -4,12 +4,11 @@ from config import MAIN_BOT_USERNAME
 from database import get_db
 
 
-# ------------------------ /settings ------------------------
 @Client.on_message(filters.command("settings") & filters.private)
 async def settings_command(client: Client, message: Message):
     if getattr(client, "is_clone", False):
         text = (
-            "<b>⚙️ Bot Settings & Customization</b>\n\n"
+            "<b>⚙️ Bot Settings &amp; Customization</b>\n\n"
             "You can manage your clone bot's settings (Start Message, Start Picture, Custom Buttons, Caption, Shortener, Verify, Force Subscribe, Log Channel, and more) from our main bot.\n\n"
             "👇 Click the button below to open the Clone Settings panel:"
         )
