@@ -1,13 +1,3 @@
-"""
-clonedb.py
-----------
-এই ফাইলটা শুধু ক্লোনের "মেটাডেটা" (কোন ইউজারের কোন বট, কোন টোকেন, কোন
-db_name, অ্যাক্টিভ/ইনঅ্যাক্টিভ স্ট্যাটাস, স্টার্ট পিকচার/মেসেজ) মূল বটের
-ডাটাবেসে `clones` নামের একটা কালেকশনে রাখে। প্রতিটা ক্লোনের নিজের
-file/user ডাটা থাকে সম্পূর্ণ আলাদা ডাটাবেসে (দেখুন database/__init__.py
-এর get_clone_database), এখানে শুধু "কোন ক্লোন কোথায়" তার হিসাব থাকে।
-"""
-
 from database import mydb
 
 
@@ -26,11 +16,11 @@ class CloneDB:
         status: str = "active",
     ):
         await self.clones.update_one(
-            {"bot_id": bot_id},
+            {"bot_id": int(bot_id)},
             {
                 "$set": {
-                    "owner_id": owner_id,
-                    "bot_id": bot_id,
+                    "owner_id": int(owner_id),
+                    "bot_id": int(bot_id),
                     "bot_username": bot_username,
                     "bot_token": bot_token,
                     "db_name": db_name,
@@ -39,6 +29,7 @@ class CloneDB:
                 "$setOnInsert": {
                     "start_pic": None,
                     "start_msg": None,
+                    "start_buttons": [],
                 },
             },
             upsert=True,
@@ -50,7 +41,6 @@ class CloneDB:
         return await self.clones.find_one({"bot_id": int(bot_id)})
 
     async def get_user_clone(self, owner_id: int):
-        """প্রতি ইউজারের ১টা করে ক্লোন — তাই এটা একটাই ডকুমেন্ট রিটার্ন করে।"""
         return await self.clones.find_one({"owner_id": int(owner_id)})
 
     async def get_user_clones_count(self, owner_id: int) -> int:
