@@ -1,18 +1,18 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
-import asyncio, pytz
-from datetime import datetime
+import asyncio
 from config import *
 from plugins.fsub import get_fsub
 from utils import b64_to_str, humanbytes
 from Script import script
 from plugins.send_file import reply_forward_once, delete_file
 from database import db, get_db
-from plugins.verification import handle_verify_case, av_verification   # ✅ new verification handler
+from plugins.verification import handle_verify_case, av_verification
+from plugins.clone import build_start_content, send_clone_entry
 
 
-# ---- Get Caption (owner ke hisaab se) ----
+# ---- Get Caption (per owner) ----
 async def get_caption(cur_db, user_id: int, file_name: str, file_size: str):
     user = await cur_db.get_user(user_id)
     caption = user.get("custom_caption")
@@ -28,7 +28,7 @@ async def get_caption(cur_db, user_id: int, file_name: str, file_size: str):
 
 # ---- Forward/Copy File ----
 async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int):
-    cur_db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
+    cur_db = get_db(bot)
     try:
         file_msg = await bot.get_messages(DB_CHANNEL, file_id)
 
@@ -45,7 +45,6 @@ async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int)
             file_name = "Unknown"
             file_size = "0 B"
 
-        # ✅ Always take caption & protect_content from file OWNER
         caption = await get_caption(cur_db, owner_uid, file_name, file_size)
         owner = await cur_db.get_user(owner_uid)
         protect = owner.get("protect_content", False)
@@ -57,7 +56,7 @@ async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int)
             caption=caption,
             protect_content=protect,
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton('✛ ᴡᴀᴛᴄʜ & ᴅᴏᴡɴʟᴏᴀᴅ ✛', callback_data=f'stream#{file_id}')]]
+                [[InlineKeyboardButton('✛ Watch & Download ✛', callback_data=f'stream#{file_id}')]]
             )
         )
 
@@ -71,50 +70,31 @@ async def send_start_message(client: Client, message: Message):
     user_id = message.from_user.id
     mention = message.from_user.mention
     me2 = (await client.get_me()).mention
-    cur_db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
+    cur_db = get_db(client)
 
     if IS_FSUB and not await get_fsub(client, message, owner_uid=None):
         return
 
     if not await cur_db.is_user_exist(user_id):
         await cur_db.add_user(user_id, message.from_user.first_name)
-        await client.send_message(LOG_CHANNEL, script.LOG_TEXT.format(me2, user_id, mention))
+        try:
+            await client.send_message(LOG_CHANNEL, script.LOG_TEXT.format(me2, user_id, mention))
+        except Exception:
+            pass
 
-    buttons = [
-        [
-            InlineKeyboardButton("• ᴜᴘᴅᴀᴛᴇᴅ •", url="https://t.me/PrimeXBots"),
-                InlineKeyboardButton("• sᴜᴘᴘᴏʀᴛ •", url="https://t.me/Prime_Support_group")
-        ],[
-            InlineKeyboardButton('• ʜᴇʟᴘ •', callback_data='help'),
-            InlineKeyboardButton('• ᴀʙᴏᴜᴛ •', callback_data='about')
-        ]
-    ]
+    start_pic, caption_text, reply_markup = await build_start_content(client, mention)
 
-    # ✨ ক্লোন মোড বাটন:
-    # - আসল (ক্লোন করা) বটে থাকলে → বাটনে ক্লিক করলে মূল বটে রিডাইরেক্ট করবে
-    # - মূল বটে থাকলে → সরাসরি "Create / Manage Clone" ফ্লো চালু করবে
-    if getattr(client, "is_clone", False):
-        buttons.append([
-            InlineKeyboardButton(
-                "✨ ᴄʀᴇᴀᴛᴇ ᴍʏ ᴏᴡɴ ᴄʟᴏɴᴇ",
-                url=f"https://t.me/{MAIN_BOT_USERNAME}?start=clone"
-            )
-        ])
-    else:
-        buttons.append([InlineKeyboardButton("✨ ᴄʀᴇᴀᴛᴇ ᴍʏ ᴏᴡɴ ᴄʟᴏɴᴇ", callback_data="create_clone")])
+    if start_pic:
+        return await message.reply_photo(
+            photo=start_pic,
+            caption=caption_text,
+            reply_markup=reply_markup
+        )
 
-    # ✨ ক্লোনের নিজস্ব Start Picture / Start Message (সেট করা থাকলে সেটাই দেখাবে)
-    start_pic = getattr(client, "custom_start_pic", None) or PICS
-    start_txt = getattr(client, "custom_start_txt", None) or script.START_TXT
-    try:
-        caption_text = start_txt.format(message.from_user.mention, me2)
-    except Exception:
-        caption_text = start_txt   # owner যদি {} ছাড়া কাস্টম টেক্সট সেট করে থাকে
-
-    return await message.reply_photo(
-        photo=start_pic,
-        caption=caption_text,
-        reply_markup=InlineKeyboardMarkup(buttons)
+    return await message.reply_text(
+        text=caption_text,
+        reply_markup=reply_markup,
+        disable_web_page_preview=True
     )
 
 
@@ -122,21 +102,25 @@ async def send_start_message(client: Client, message: Message):
 @Client.on_message(filters.command("start") & filters.incoming)
 async def start(client: Client, message: Message):
 
-    # ✅ Case 1: Normal /start
+    # Case 1: Normal /start
     if len(message.command) == 1:
         return await send_start_message(client, message)
 
     raw = message.command[1]
 
-    # Agar "_" hi nahi hai → normal start msg
+    # Deep-link: /start clone
+    if raw == "clone":
+        return await send_clone_entry(client, message, is_callback=False)
+
+    # Normal start if no payload format matched
     if "_" not in raw and not raw.startswith("verify-"):
         return await send_start_message(client, message)
 
-    # ✅ Case 2: Verification
+    # Case 2: Verification
     if raw.startswith("verify-"):
         return await handle_verify_case(client, message, raw)
 
-    # ✅ Case 3: File Access
+    # Case 3: File Access
     if raw.startswith("file"):
         try:
             decoded = b64_to_str(raw.split("_", 1)[1])  # uid:fileid
@@ -148,16 +132,13 @@ async def start(client: Client, message: Message):
             owner_uid = int(owner_uid)
             file_id = int(file_id)
 
-            # Owner ke FSUB channels check karo
             if IS_FSUB and not await get_fsub(client, message, owner_uid=owner_uid):
                 return
 
-            # Verification check (अगर जरूरी है तो)
             verified = await av_verification(client, message, owner_uid=owner_uid, file_id=file_id)
             if not verified:
                 return
 
-            # DB_CHANNEL se message lo
             GetMessage = await client.get_messages(chat_id=DB_CHANNEL, message_ids=file_id)
 
             # --- Batch Case ---
