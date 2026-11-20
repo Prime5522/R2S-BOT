@@ -24,11 +24,12 @@ class Bot(Client):
         await super().start()
         me = await self.get_me()
         self.bot_id = me.id
+        self.first_name = me.first_name
         self.mention = me.mention
         self.username = me.username
-        # Main bot (not a clone)
         self.is_clone = False
         self.custom_start_pic = None
+        self.custom_start_pic_bytes = None
         self.custom_start_txt = None
         self.custom_start_buttons = []
 
@@ -37,7 +38,6 @@ class Bot(Client):
         now = datetime.now(tz)
         time = now.strftime("%H:%M:%S %p")
 
-        # Web Server Initialization
         app_instance = await web_server()
         app_runner = web.AppRunner(app_instance)
         await app_runner.setup()
@@ -46,21 +46,18 @@ class Bot(Client):
 
         print(f"{me.first_name} STARTED ⚡️⚡️⚡️")
 
-        # Restore all active saved clones
         try:
             await load_all_clones()
             print("✨ All Saved Clones Restored ✨")
         except Exception as e:
             print(f"❌ Failed to restore clones: {e}")
 
-        # Notify Admins
         if isinstance(ADMINS, list):
             for admin in ADMINS:
                 await self.send_message(admin, f"**__{me.first_name} Is Started.....✨️__**")
         else:
             await self.send_message(ADMINS, f"**__{me.first_name} Is Started.....✨️__**")
 
-        # Send Restart Log
         await self.send_message(
             LOG_CHANNEL,
             text=(
@@ -82,5 +79,4 @@ class Bot(Client):
         print("Bot Stopped")
 
 
-# Run the Bot
 Bot().run()
