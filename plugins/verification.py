@@ -4,7 +4,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import *
 from Script import script
-from database import db
+from database import db, get_db
 from utils import temp, logger
 
 # -------------------------- TOKEN VALIDITY CHECK --------------------------
@@ -14,6 +14,7 @@ async def check_token(bot, userid: int, token: str) -> bool:
 
 # -------------------------- TOKEN GENERATOR --------------------------
 async def get_token(bot, userid: int, link: str, owner_uid: int, file_id: int) -> str:
+    db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     token = "".join(random.choices(string.ascii_letters + string.digits, k=7))
 
     if userid not in temp.TOKENS:
@@ -26,7 +27,13 @@ async def get_token(bot, userid: int, link: str, owner_uid: int, file_id: int) -
     return await db.get_verify_link(owner, full_link)
 
 # -------------------------- GET VERIFICATION STATUS --------------------------
-async def get_verify_status(userid: int) -> dict | None:
+# ⚠️ নোট: temp.VERIFIED/temp.TOKENS ক্যাশ পুরো process-এর জন্য একটাই (মূল বট +
+# সব ক্লোন শেয়ার করে)। এতে persistent DB ডাটা সব সময় সঠিক ক্লোনের নিজস্ব db-তেই
+# সেভ/রিড হয় (এটাই গুরুত্বপূর্ণ), শুধু এই in-memory ক্যাশটা (temporary, রিস্টার্টে
+# মুছে যায়) যদি একই Telegram user_id মূল বট ও কোনো ক্লোনে একইসাথে ভেরিফাই করে,
+# তাহলে সামান্য ওভারল্যাপ হতে পারে — সেটা ঠিক করতে চাইলে আলাদাভাবে জানাবেন।
+async def get_verify_status(bot, userid: int) -> dict | None:
+    db = get_db(bot)
     status = temp.VERIFIED.get(userid)
     if not status:
         status = await db.get_verified(userid)
@@ -35,8 +42,9 @@ async def get_verify_status(userid: int) -> dict | None:
     return status
 
 # -------------------------- UPDATE VERIFICATION STATUS --------------------------
-async def update_verify_status(userid: int, date_temp: str, time_temp: str):
-    status = await get_verify_status(userid) or {}
+async def update_verify_status(bot, userid: int, date_temp: str, time_temp: str):
+    db = get_db(bot)
+    status = await get_verify_status(bot, userid) or {}
     status["date"] = date_temp
     status["time"] = time_temp
     temp.VERIFIED[userid] = status
@@ -44,6 +52,7 @@ async def update_verify_status(userid: int, date_temp: str, time_temp: str):
 
 # -------------------------- VERIFY USER --------------------------
 async def verify_user(bot, userid: int, token: str, owner_uid: int):
+    db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     temp.TOKENS[userid][token] = True
 
     uinfo = await db.get_user(owner_uid)
@@ -53,6 +62,7 @@ async def verify_user(bot, userid: int, token: str, owner_uid: int):
     expiry = datetime.now(tz) + timedelta(seconds=expire_seconds)
 
     await update_verify_status(
+        bot,
         userid,
         expiry.strftime("%Y-%m-%d"),
         expiry.strftime("%H:%M:%S")
@@ -65,7 +75,7 @@ async def check_verification(bot, userid: int) -> bool:
     current_time = time(now.hour, now.minute, now.second)
     today = date.today()
 
-    status = await get_verify_status(userid)
+    status = await get_verify_status(bot, userid)
     if not status:
         return False
 
@@ -80,6 +90,7 @@ async def check_verification(bot, userid: int) -> bool:
 
 # -------------------------- VERIFY CASE HANDLER --------------------------
 async def handle_verify_case(client, message, raw: str):
+    db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     try:
         _, userid, data, token = raw.split("-", 3)
         owner_uid, file_id = data.split(":")
@@ -97,10 +108,11 @@ async def handle_verify_case(client, message, raw: str):
         return await message.reply_text("<b>⚠️ Link expired or already used!</b>")
 
     # ✅ verified होने के बाद file button देना
+    bot_username = getattr(client, "username", None) or (await client.get_me()).username
     btn = [[
         InlineKeyboardButton(
             "Cʟɪᴄᴋ Hᴇʀᴇ Tᴏ Gᴇᴛ Fɪʟᴇ..🍁",
-            url=f"https://t.me/{BOT_USERNAME}?start=file_{file_id}"
+            url=f"https://t.me/{bot_username}?start=file_{file_id}"
         )
     ]]
 
@@ -130,6 +142,7 @@ async def handle_verify_case(client, message, raw: str):
 
 # -------------------------- VERIFICATION ENTRY -------------------------- #
 async def av_verification(client, message, owner_uid: int = None, file_id: int = 0):
+    db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     user_id = message.from_user.id
 
     owner = await db.get_user(owner_uid)
@@ -138,10 +151,11 @@ async def av_verification(client, message, owner_uid: int = None, file_id: int =
 
     if verify and not await check_verification(client, user_id):
         # ✅ अब token में owner_uid + file_id bhi होगा
+        bot_username = getattr(client, "username", None) or (await client.get_me()).username
         verify_url = await get_token(
             client,
             user_id,
-            f"https://t.me/{BOT_USERNAME}?start=",
+            f"https://t.me/{bot_username}?start=",
             owner_uid,
             file_id
         )
