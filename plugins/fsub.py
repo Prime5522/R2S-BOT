@@ -3,10 +3,11 @@ from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.errors import UserNotParticipant
 from config import AUTH_CHANNELS
-from database import db
+from database import db, get_db
 
 
 async def get_fsub(bot: Client, message: Message, owner_uid: int = None) -> bool:
+    db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     user_id = message.from_user.id
     me = await bot.get_me()
 
