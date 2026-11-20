@@ -5,7 +5,6 @@ class CloneDB:
     def __init__(self):
         self.clones = mydb.clones
 
-    # ---- Create / Update ----
     async def save_clone(
         self,
         owner_id: int,
@@ -28,6 +27,7 @@ class CloneDB:
                 },
                 "$setOnInsert": {
                     "start_pic": None,
+                    "start_pic_bytes": None,
                     "start_msg": None,
                     "start_buttons": [],
                 },
@@ -36,7 +36,6 @@ class CloneDB:
         )
         return await self.get_clone(bot_id)
 
-    # ---- Read ----
     async def get_clone(self, bot_id: int):
         return await self.clones.find_one({"bot_id": int(bot_id)})
 
@@ -52,17 +51,14 @@ class CloneDB:
     async def total_clones_count(self) -> int:
         return await self.clones.count_documents({})
 
-    # ---- Update ----
     async def set_status(self, bot_id: int, status: str):
         await self.clones.update_one({"bot_id": int(bot_id)}, {"$set": {"status": status}})
 
     async def update_clone_settings(self, bot_id: int, values: dict):
         await self.clones.update_one({"bot_id": int(bot_id)}, {"$set": values})
 
-    # ---- Delete ----
     async def delete_clone(self, bot_id: int):
         await self.clones.delete_one({"bot_id": int(bot_id)})
 
 
-# Instance
 clone_db = CloneDB()
