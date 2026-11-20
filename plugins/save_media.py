@@ -1,11 +1,11 @@
 import asyncio
 import traceback
-from config import BOT_USERNAME, DB_CHANNEL, LOG_CHANNEL, WEBSITE_URL, WEBSITE_URL_MODE
+from config import DB_CHANNEL, LOG_CHANNEL, WEBSITE_URL, WEBSITE_URL_MODE
 from pyrogram import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
 from utils import str_to_b64
-from database import db
+from database import db, get_db
 
 BATCH_SLEEP = 2
 
@@ -25,6 +25,8 @@ async def copy_to_channel(bot: Client, message: Message, editable: Message):
 
 # 🔥 Save Batch Media (fixed)
 async def save_batch_media_in_channel(bot: Client, editable: Message, message_ids: list, owner_uid: int):
+    db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
+    bot_username = getattr(bot, "username", None) or (await bot.get_me()).username
     try:
         message_ids_str = ""
         messages = await bot.get_messages(chat_id=editable.chat.id, message_ids=message_ids)
@@ -53,7 +55,7 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
         if use_permanent_link:
             share_link = f"{WEBSITE_URL}?AVBOTZ=file_{str_to_b64(unique_str)}"
         else:
-            share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
+            share_link = f"https://t.me/{bot_username}?start=file_{str_to_b64(unique_str)}"
 
         short_link = await db.get_short_link(user, share_link)
 
@@ -102,6 +104,8 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
         
 # 🔥 Save Single Media
 async def save_media_in_channel(bot: Client, editable: Message, message: Message):
+    db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
+    bot_username = getattr(bot, "username", None) or (await bot.get_me()).username
     try:
         copied_msg = await message.copy(DB_CHANNEL)
         file_er_id = str(copied_msg.id)
@@ -134,7 +138,7 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
         if use_permanent_link:
             share_link = f"{WEBSITE_URL}?AVBOTZ=file_{str_to_b64(unique_str)}"
         else:
-            share_link = f"https://t.me/{BOT_USERNAME}?start=file_{str_to_b64(unique_str)}"
+            share_link = f"https://t.me/{bot_username}?start=file_{str_to_b64(unique_str)}"
             
         short_link = await db.get_short_link(user, share_link)
 
