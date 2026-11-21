@@ -5,13 +5,13 @@ import asyncio
 
 from config import VERIFY, HOW_TO_VERIFY, LOG_CHANNEL, DB_CHANNEL, IS_FSUB
 from utils import str_to_b64, check_verification, get_token
-from database import db, get_db
+from database import get_db
 from Script import script
 from plugins.fsub import get_fsub
 
 
 async def av_verification(client, message, owner_uid: int = None):
-    db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
+    db = get_db(client)
     user_id = message.from_user.id
 
     owner = await db.get_user(owner_uid)
@@ -22,10 +22,10 @@ async def av_verification(client, message, owner_uid: int = None):
         bot_username = getattr(client, "username", None) or (await client.get_me()).username
         btn = [[
             InlineKeyboardButton(
-                "✅️ ᴠᴇʀɪғʏ ✅️",
+                "✅️ Verify ✅️",
                 url=await get_token(client, user_id, f"https://t.me/{bot_username}?start=")
             ),
-            InlineKeyboardButton("⁉️ ʜᴏᴡ ᴛᴏ ᴠᴇʀɪғʏ ⁉️", url=download)
+            InlineKeyboardButton("⁉️ How To Verify ⁉️", url=download)
         ]]
 
         d = await message.reply_text(
@@ -35,24 +35,22 @@ async def av_verification(client, message, owner_uid: int = None):
             disable_web_page_preview=True,
             parse_mode=ParseMode.HTML
         )
-        
-        # 10 min बाद msg delete हो जाएगा
+
         await asyncio.sleep(600)
         try:
             await d.delete()
             await message.delete()
-        except:
+        except Exception:
             pass
         return False
 
     return True
-    
+
 
 @Client.on_message((filters.document | filters.video | filters.audio) & ~filters.chat(DB_CHANNEL))
 async def main(bot: Client, message):
-    db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
+    db = get_db(bot)
 
-    # 🛡️ Sender Check (user / channel / anonymous)
     if message.from_user:
         user_id = message.from_user.id
         mention = message.from_user.mention
@@ -60,68 +58,65 @@ async def main(bot: Client, message):
         user_id = message.sender_chat.id
         mention = message.sender_chat.title if message.sender_chat.title else "Anonymous"
     else:
-        print("⚠️ Unknown sender. Skipping message.")
         return
 
-    me2 = (await bot.get_me()).mention
+    me2 = getattr(bot, "mention", None) or (await bot.get_me()).mention
 
-    # ✅ FSUB Check
-    if IS_FSUB and not await get_fsub(bot, message, owner_uid=None):
-        return
+    if IS_FSUB and not getattr(bot, "is_clone", False):
+        if not await get_fsub(bot, message, owner_uid=None):
+            return
 
-    # ✅ User Database Entry
     if not await db.is_user_exist(user_id):
         await db.add_user(user_id, mention)
-        await bot.send_message(
-            LOG_CHANNEL,
-            script.LOG_TEXT.format(me2, user_id, mention)
-        )
+        if not getattr(bot, "is_clone", False):
+            try:
+                await bot.send_message(
+                    LOG_CHANNEL,
+                    script.LOG_TEXT.format(me2, user_id, mention)
+                )
+            except Exception:
+                pass
 
-    # ✅ Private Chat Handling
     if message.chat.type == enums.ChatType.PRIVATE:
         await message.reply_text(
-            "**ᴄʜᴏᴏsᴇ ᴀɴ ᴏᴘᴛɪᴏɴ ꜰʀᴏᴍ ʙᴇʟᴏᴡ :**",
+            "<b>Choose an option below:</b>",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("ꜱᴀᴠᴇ ɪɴ ʙᴀᴛᴄʜ", callback_data="addToBatchTrue")],
-                [InlineKeyboardButton("ɢᴇᴛ ꜱʜᴀʀᴀʙʟᴇ ʟɪɴᴋ", callback_data="addToBatchFalse")]
+                [InlineKeyboardButton("📦 Save in Batch", callback_data="addToBatchTrue")],
+                [InlineKeyboardButton("🔗 Get Shareable Link", callback_data="addToBatchFalse")]
             ]),
             quote=True,
             disable_web_page_preview=True
         )
 
-    # ✅ Channel Handling
     elif message.chat.type == enums.ChatType.CHANNEL:
-        # যদি forward করা message হয়, তাহলে ignore করো
         if message.forward_from_chat or message.forward_from:
             return
 
         try:
-            # DB_CHANNEL এ message forward করা
-            forwarded_msg = await message.forward(DB_CHANNEL)
-            file_er_id = str(forwarded_msg.id)
-
-            # ✅ Owner ID নির্ধারণ (channel/user উভয়ের জন্য)
-            if message.from_user:
-                owner_uid = message.from_user.id
-            elif message.sender_chat:
-                owner_uid = message.sender_chat.id
-            else:
-                owner_uid = 0  # fallback
-
-            # ✅ user_id + file_id base64 encode
-            unique_str = f"{owner_uid}:{file_er_id}"
+            owner_uid = message.from_user.id if message.from_user else (message.sender_chat.id if message.sender_chat else 0)
             bot_username = getattr(bot, "username", None) or (await bot.get_me()).username
-            share_link = f"https://t.me/{bot_username}?start=_{str_to_b64(unique_str)}"
 
-            # ✅ Inline Button update করা
+            if getattr(bot, "is_clone", False):
+                from plugins.save_media import extract_media_info
+                info = extract_media_info(message)
+                if not info:
+                    return
+                stored_id = await db.save_clone_file(owner_uid, [info])
+                unique_str = f"{owner_uid}:{stored_id}"
+                share_link = f"https://t.me/{bot_username}?start=file_{str_to_b64(unique_str)}"
+            else:
+                forwarded_msg = await message.forward(DB_CHANNEL)
+                file_er_id = str(forwarded_msg.id)
+                unique_str = f"{owner_uid}:{file_er_id}"
+                share_link = f"https://t.me/{bot_username}?start=file_{str_to_b64(unique_str)}"
+
             await bot.edit_message_reply_markup(
                 message.chat.id,
                 message.id,
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("ɢᴇᴛ ꜱʜᴀʀᴀʙʟᴇ ʟɪɴᴋ", url=share_link)]]
+                    [[InlineKeyboardButton("🔗 Get Shareable Link", url=share_link)]]
                 )
             )
 
         except Exception as err:
             print(f"Error while processing channel message: {err}")
-            
