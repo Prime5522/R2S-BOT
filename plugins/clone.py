@@ -69,26 +69,40 @@ async def resolve_target_client(client: Client, clone_bot_id: int = None):
 
 
 async def send_or_edit_text(
-    query: CallbackQuery,
+    target,
     text: str,
     reply_markup: InlineKeyboardMarkup = None,
     disable_web_page_preview: bool = True,
 ):
-    if query.message.text:
+    """
+    ✨ target হতে পারে একটা CallbackQuery (বাটনে ক্লিক করলে) অথবা সরাসরি একটা
+    Message (যেমন কোনো টেক্সট পাঠানোর পর)। দুই ক্ষেত্রেই সঠিকভাবে কাজ করবে।
+    """
+    if isinstance(target, CallbackQuery):
+        msg = target.message
+        if msg.text:
+            try:
+                return await msg.edit_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=enums.ParseMode.HTML,
+                    disable_web_page_preview=disable_web_page_preview,
+                )
+            except Exception:
+                pass
         try:
-            return await query.message.edit_text(
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=enums.ParseMode.HTML,
-                disable_web_page_preview=disable_web_page_preview,
-            )
+            await msg.delete()
         except Exception:
             pass
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-    return await query.message.reply_text(
+        return await msg.reply_text(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=enums.ParseMode.HTML,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+
+    # target একটা সরাসরি Message (ইউজার কিছু পাঠানোর পর রিপ্লাই হিসেবে)
+    return await target.reply_text(
         text=text,
         reply_markup=reply_markup,
         parse_mode=enums.ParseMode.HTML,
@@ -163,7 +177,7 @@ async def build_start_content(client: Client, user_mention: str):
             InlineKeyboardButton("• About •", callback_data="about"),
         ],
         [
-            InlineKeyboardButton("✨ Create / Manage Clone", callback_data="create_clone"),
+            InlineKeyboardButton("✨ Create Your Own Clone", callback_data="create_clone"),
         ],
     ]
     return start_pic, None, caption_text, InlineKeyboardMarkup(buttons)
@@ -312,6 +326,12 @@ async def send_clone_entry(client: Client, target, is_callback: bool = False):
     return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
 
 
+async def _get_owner_settings(clone_doc: dict):
+    clone_user_db = get_clone_database(int(clone_doc["bot_id"]), clone_doc["db_name"])
+    owner_settings = await clone_user_db.get_user(int(clone_doc["owner_id"]))
+    return clone_user_db, owner_settings
+
+
 async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = True):
     bot_id = clone_doc["bot_id"]
     owner_id = int(clone_doc["owner_id"])
@@ -320,62 +340,24 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
     status_label = "✅ Active" if status == "active" else "⛔ Inactive"
     toggle_label = "⛔ Deactivate" if status == "active" else "✅ Activate"
 
-    has_msg = bool(clone_doc.get("start_msg"))
-    has_pic = bool(clone_doc.get("start_pic") or clone_doc.get("start_pic_bytes"))
-    saved_btns = clone_doc.get("start_buttons") or []
-    btn_count = sum(len(r) for r in saved_btns)
-
-    clone_user_db = get_clone_database(int(bot_id), clone_doc["db_name"])
-    owner_settings = await clone_user_db.get_user(owner_id)
-    has_caption = "Custom" if owner_settings.get("custom_caption") else "Default"
+    _, owner_settings = await _get_owner_settings(clone_doc)
     protect_on = bool(owner_settings.get("protect_content", False))
-    has_short = "Set" if owner_settings.get("shortener_api") else "None"
-    verify_on = "ON" if owner_settings.get("verify") else "OFF"
-    fsub_count = len(owner_settings.get("fsub_channels") or [])
-    has_log = "Set" if owner_settings.get("log_channel") else "None"
 
     text = (
-        f"<b>🛠 Clone Customization — @{bot_username}</b>\n\n"
-        f"• <b>Bot Status:</b> {status_label}\n\n"
-        "<b>🎨 Start Appearance:</b>\n"
-        f"• <b>Start Message:</b> {'Custom' if has_msg else 'Default'} — <i>Replaces default /start text</i>\n"
-        f"• <b>Start Picture:</b> {'Set' if has_pic else 'None'} — <i>Shown on /start</i>\n"
-        f"• <b>Start Buttons:</b> {btn_count} — <i>Shown below default buttons</i>\n\n"
-        "<b>⚙️ File &amp; Bot Settings:</b>\n"
-        f"• <b>Caption:</b> {has_caption}  |  <b>Protect:</b> {'ON ✅' if protect_on else 'OFF ❌'}\n"
-        f"• <b>Shortener:</b> {has_short}  |  <b>Verify:</b> {verify_on}\n"
-        f"• <b>Force Sub:</b> {fsub_count} channel(s)  |  <b>Log Channel:</b> {has_log}\n\n"
-        "👇 <i>Tap any button below to customize directly:</i>"
+        f"<b>✨ ᴄʟᴏɴᴇ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ — @{bot_username}</b>\n\n"
+        f"📌 <b>Status:</b> {status_label}\n\n"
+        "ʏᴏᴜʀ ᴄʟᴏɴᴇ ɪs ᴀ ꜰᴜʟʟʏ ɪɴᴅᴇᴘᴇɴᴅᴇɴᴛ ʙᴏᴛ ᴡɪᴛʜ ɪᴛs ᴏᴡɴ ᴅᴀᴛᴀʙᴀsᴇ.\n"
+        "ᴜsᴇ ᴛʜᴇ ᴄᴀᴛᴇɢᴏʀɪᴇs ʙᴇʟᴏᴡ ᴛᴏ ᴍᴀᴋᴇ ɪᴛ ʏᴏᴜʀ ᴏᴡɴ 👇"
     )
 
-    buttons = []
-
-    if has_msg:
-        buttons.append([
-            InlineKeyboardButton("✏️ Edit Start Msg", callback_data=f"clone_setmsg#{bot_id}"),
-            InlineKeyboardButton("♻️ Reset Msg", callback_data=f"clone_delmsg#{bot_id}"),
-        ])
-    else:
-        buttons.append([InlineKeyboardButton("📝 Set Start Message", callback_data=f"clone_setmsg#{bot_id}")])
-
-    if has_pic:
-        buttons.append([
-            InlineKeyboardButton("🖼 Change Start Pic", callback_data=f"clone_setpic#{bot_id}"),
-            InlineKeyboardButton("🗑 Remove Pic", callback_data=f"clone_delpic#{bot_id}"),
-        ])
-    else:
-        buttons.append([InlineKeyboardButton("🖼 Set Start Picture", callback_data=f"clone_setpic#{bot_id}")])
-
-    if btn_count > 0:
-        buttons.append([
-            InlineKeyboardButton("🔘 Edit Buttons", callback_data=f"clone_setbtns#{bot_id}"),
-            InlineKeyboardButton("🗑 Clear Buttons", callback_data=f"clone_delbtns#{bot_id}"),
-        ])
-    else:
-        buttons.append([InlineKeyboardButton("🔘 Set Start Buttons", callback_data=f"clone_setbtns#{bot_id}")])
-
     sfx = f"{owner_id}#{bot_id}"
-    buttons.extend([
+    buttons = [
+        [InlineKeyboardButton("🎨 Start Appearance", callback_data=f"clone_appearance#{bot_id}")],
+        [
+            InlineKeyboardButton("📄 About", callback_data=f"clone_about_view#{bot_id}"),
+            InlineKeyboardButton("❓ Help", callback_data=f"clone_help_view#{bot_id}"),
+        ],
+        [InlineKeyboardButton("📎 File Delivery Buttons", callback_data=f"clone_filebtns_view#{bot_id}")],
         [
             InlineKeyboardButton("📝 File Caption", callback_data=f"caption_setgs#{sfx}"),
             InlineKeyboardButton(
@@ -394,8 +376,8 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
         [
             InlineKeyboardButton("🎬 Tutorial", callback_data=f"tutorial_setgs#{sfx}"),
             InlineKeyboardButton("🔗 Perm. Link", callback_data=f"permanent_link_setgs#{sfx}"),
-            InlineKeyboardButton("📑 Details", callback_data=f"user_details#{sfx}"),
         ],
+        [InlineKeyboardButton("📑 Full Details", callback_data=f"clone_details#{bot_id}")],
         [
             InlineKeyboardButton("🔁 Restart", callback_data=f"clone_restart#{bot_id}"),
             InlineKeyboardButton(toggle_label, callback_data=f"clone_toggle#{bot_id}"),
@@ -404,12 +386,235 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
             InlineKeyboardButton("🗑 Delete Clone", callback_data=f"clone_delete#{bot_id}"),
             InlineKeyboardButton("« Back", callback_data="clone_card"),
         ],
-    ])
+    ]
 
     markup = InlineKeyboardMarkup(buttons)
     if is_callback:
         return await send_or_edit_text(target, text, markup)
     return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+
+
+# ================= ✨ START APPEARANCE SUB-MENU ✨ =================
+
+async def show_appearance_menu(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    has_msg = bool(clone_doc.get("start_msg"))
+    has_pic = bool(clone_doc.get("start_pic") or clone_doc.get("start_pic_bytes"))
+    saved_btns = clone_doc.get("start_buttons") or []
+    btn_count = sum(len(r) for r in saved_btns)
+
+    text = (
+        "<b>🎨 Start Appearance</b>\n\n"
+        "ᴛʜɪs ɪs ᴡʜᴀᴛ ᴜsᴇʀs sᴇᴇ ᴡʜᴇɴ ᴛʜᴇʏ ᴘʀᴇss <code>/start</code> ᴏɴ ʏᴏᴜʀ ᴄʟᴏɴᴇ.\n\n"
+        f"🖼 <b>Start Picture:</b> {'Set ✅' if has_pic else 'Default'}\n"
+        f"📝 <b>Start Message:</b> {'Custom ✅' if has_msg else 'Default'}\n"
+        f"🔘 <b>Extra Buttons:</b> {btn_count} set\n\n"
+        "👇 ᴛᴀᴘ ᴀ sᴇᴄᴛɪᴏɴ ᴛᴏ ᴠɪᴇᴡ, ᴄʜᴀɴɢᴇ ᴏʀ ᴅᴇʟᴇᴛᴇ ɪᴛ:"
+    )
+    buttons = [
+        [InlineKeyboardButton("🖼 Start Picture", callback_data=f"clone_viewpic#{bot_id}")],
+        [InlineKeyboardButton("📝 Start Message", callback_data=f"clone_viewmsg#{bot_id}")],
+        [InlineKeyboardButton("🔘 Start Buttons", callback_data=f"clone_viewbtns#{bot_id}")],
+        [InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")],
+    ]
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_pic_view(client: Client, target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    pic = clone_doc.get("start_pic")
+    pic_bytes = clone_doc.get("start_pic_bytes")
+    back_cb = f"clone_appearance#{bot_id}"
+    chat_id = target.message.chat.id if isinstance(target, CallbackQuery) else target.chat.id
+
+    if pic or pic_bytes:
+        buttons = [
+            [InlineKeyboardButton("🖼 Change Picture", callback_data=f"clone_setpic#{bot_id}")],
+            [InlineKeyboardButton("🗑 Delete Picture", callback_data=f"clone_delpic#{bot_id}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)],
+        ]
+        caption = "<b>🖼 Current Start Picture</b>\n\nThis is the photo shown on <code>/start</code>."
+        if isinstance(target, CallbackQuery):
+            try:
+                await target.message.delete()
+            except Exception:
+                pass
+        if pic:
+            return await client.send_photo(chat_id, photo=pic, caption=caption, reply_markup=InlineKeyboardMarkup(buttons))
+        bio = io.BytesIO(bytes(pic_bytes))
+        bio.name = "start.jpg"
+        return await client.send_photo(chat_id, photo=bio, caption=caption, reply_markup=InlineKeyboardMarkup(buttons))
+
+    text = "<b>🖼 Start Picture</b>\n\nNo custom picture set — your clone is using the default picture."
+    buttons = [
+        [InlineKeyboardButton("🖼 Set Start Picture", callback_data=f"clone_setpic#{bot_id}")],
+        [InlineKeyboardButton("« Back", callback_data=back_cb)],
+    ]
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_msg_view(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    msg = clone_doc.get("start_msg")
+    back_cb = f"clone_appearance#{bot_id}"
+
+    if msg:
+        text = f"<b>📝 Current Start Message</b>\n\n<blockquote>{msg}</blockquote>"
+        buttons = [
+            [InlineKeyboardButton("✏️ Edit Message", callback_data=f"clone_setmsg#{bot_id}")],
+            [InlineKeyboardButton("♻️ Reset to Default", callback_data=f"clone_delmsg#{bot_id}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)],
+        ]
+    else:
+        text = "<b>📝 Start Message</b>\n\nNo custom message set — your clone is using the default welcome text."
+        buttons = [
+            [InlineKeyboardButton("📝 Set Start Message", callback_data=f"clone_setmsg#{bot_id}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)],
+        ]
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_btns_view(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    saved_rows = clone_doc.get("start_buttons") or []
+    back_cb = f"clone_appearance#{bot_id}"
+
+    text = "<b>🔘 Start Buttons</b>\n\nThese appear below your clone's default Home buttons.\n"
+    buttons = []
+    if saved_rows:
+        text += "\n👇 <i>Live preview is below — tap Edit or Clear to change them.</i>"
+        for row in saved_rows:
+            btn_row = [InlineKeyboardButton(b["text"], url=b["url"]) for b in row if b.get("text") and b.get("url")]
+            if btn_row:
+                buttons.append(btn_row)
+        buttons.append([InlineKeyboardButton("✏️ Edit Buttons", callback_data=f"clone_setbtns#{bot_id}")])
+        buttons.append([InlineKeyboardButton("🗑 Clear All", callback_data=f"clone_delbtns#{bot_id}")])
+    else:
+        text += "\nNo extra buttons set yet."
+        buttons.append([InlineKeyboardButton("🔘 Set Start Buttons", callback_data=f"clone_setbtns#{bot_id}")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data=back_cb)])
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+# ================= ✨ ABOUT / HELP CUSTOMIZATION ✨ =================
+
+async def show_about_view(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    about = clone_doc.get("about_text")
+    back_cb = f"manage_clone#{bot_id}"
+
+    text = (
+        "<b>📄 About Page</b>\n\n"
+        "You can customize the top part of your bot's About page.\n"
+        f"⚠️ <i>Note: the line \"Cʟᴏɴᴇ Fʀᴏᴍ: @{MAIN_BOT_USERNAME}\" always stays at the bottom and cannot be removed.</i>\n"
+    )
+    if about:
+        text += f"\n<b>Current custom text:</b>\n<blockquote>{about}</blockquote>"
+        buttons = [
+            [InlineKeyboardButton("✏️ Edit About Text", callback_data=f"clone_setabout#{bot_id}")],
+            [InlineKeyboardButton("♻️ Reset to Default", callback_data=f"clone_delabout#{bot_id}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)],
+        ]
+    else:
+        text += "\nUsing the default About text right now."
+        buttons = [
+            [InlineKeyboardButton("📝 Set Custom About Text", callback_data=f"clone_setabout#{bot_id}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)],
+        ]
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_help_view(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    help_txt = clone_doc.get("help_text")
+    back_cb = f"manage_clone#{bot_id}"
+
+    text = "<b>❓ Help Page</b>\n\nCustomize what users see when they tap \"Help\" on your clone bot.\n"
+    if help_txt:
+        text += f"\n<b>Current custom text:</b>\n<blockquote>{help_txt}</blockquote>"
+        buttons = [
+            [InlineKeyboardButton("✏️ Edit Help Text", callback_data=f"clone_sethelp#{bot_id}")],
+            [InlineKeyboardButton("♻️ Reset to Default", callback_data=f"clone_delhelp#{bot_id}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)],
+        ]
+    else:
+        text += "\nUsing the default Help text right now."
+        buttons = [
+            [InlineKeyboardButton("📝 Set Custom Help Text", callback_data=f"clone_sethelp#{bot_id}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)],
+        ]
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+# ================= ✨ FILE DELIVERY BUTTONS ✨ =================
+
+async def show_filebtns_view(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    saved_rows = clone_doc.get("file_buttons") or []
+    back_cb = f"manage_clone#{bot_id}"
+
+    text = (
+        "<b>📎 File Delivery Buttons</b>\n\n"
+        "ᴛʜᴇsᴇ ʙᴜᴛᴛᴏɴs ᴀᴘᴘᴇᴀʀ ᴜɴᴅᴇʀ ᴇᴠᴇʀʏ ꜰɪʟᴇ ʏᴏᴜʀ ʙᴏᴛ ᴅᴇʟɪᴠᴇʀs ᴛᴏ ᴜsᴇʀs\n"
+        "<i>(not on the /start message — a separate thing from Start Buttons).</i>\n"
+    )
+    buttons = []
+    if saved_rows:
+        text += "\n👇 <i>Live preview below:</i>"
+        for row in saved_rows:
+            btn_row = [InlineKeyboardButton(b["text"], url=b["url"]) for b in row if b.get("text") and b.get("url")]
+            if btn_row:
+                buttons.append(btn_row)
+        buttons.append([InlineKeyboardButton("✏️ Edit Buttons", callback_data=f"clone_setfilebtns#{bot_id}")])
+        buttons.append([InlineKeyboardButton("🗑 Clear All", callback_data=f"clone_delfilebtns#{bot_id}")])
+    else:
+        text += "\nNo file-delivery buttons set yet."
+        buttons.append([InlineKeyboardButton("🔘 Set File Buttons", callback_data=f"clone_setfilebtns#{bot_id}")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data=back_cb)])
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+# ================= ✨ FULL DETAILS ✨ =================
+
+async def show_clone_details(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    bot_username = clone_doc.get("bot_username") or "Unknown"
+    status = clone_doc.get("status", "active")
+    owner_mention = clone_doc.get("owner_mention") or f"<code>{clone_doc.get('owner_id')}</code>"
+
+    _, owner_settings = await _get_owner_settings(clone_doc)
+
+    has_msg = clone_doc.get("start_msg")
+    has_pic = bool(clone_doc.get("start_pic") or clone_doc.get("start_pic_bytes"))
+    start_btn_count = sum(len(r) for r in (clone_doc.get("start_buttons") or []))
+    file_btn_count = sum(len(r) for r in (clone_doc.get("file_buttons") or []))
+    has_about = bool(clone_doc.get("about_text"))
+    has_help = bool(clone_doc.get("help_text"))
+
+    text = (
+        f"<b>📑 Full Clone Details</b>\n\n"
+        f"🤖 <b>Bot:</b> @{bot_username} (<code>{bot_id}</code>)\n"
+        f"👤 <b>Owner:</b> {owner_mention}\n"
+        f"📌 <b>Status:</b> {'✅ Active' if status == 'active' else '⛔ Inactive'}\n\n"
+        f"<b>🎨 Start Screen:</b>\n"
+        f"• Picture: {'Set ✅' if has_pic else 'Default'}\n"
+        f"• Message: {'Custom ✅ — ' + has_msg[:60] + ('...' if len(has_msg) > 60 else '') if has_msg else 'Default'}\n"
+        f"• Extra Buttons: {start_btn_count}\n\n"
+        f"<b>📄 Pages:</b>\n"
+        f"• About: {'Custom ✅' if has_about else 'Default'}  |  Help: {'Custom ✅' if has_help else 'Default'}\n\n"
+        f"<b>📎 File Delivery:</b>\n"
+        f"• Buttons attached to every file: {file_btn_count}\n\n"
+        f"<b>⚙️ File &amp; Bot Settings:</b>\n"
+        f"• Caption: {'Custom' if owner_settings.get('custom_caption') else 'Default'}\n"
+        f"• Protect Content: {'ON ✅' if owner_settings.get('protect_content') else 'OFF ❌'}\n"
+        f"• Shortener: {'Set' if owner_settings.get('shortener_api') else 'None'}\n"
+        f"• Verification: {'ON' if owner_settings.get('verify') else 'OFF'}\n"
+        f"• Force Sub Channels: {len(owner_settings.get('fsub_channels') or [])}\n"
+        f"• Log Channel: {'Set' if owner_settings.get('log_channel') else 'None'}\n"
+        f"• Permanent Link Mode: {'ON' if owner_settings.get('permanent_link_mode') else 'OFF'}\n"
+    )
+    buttons = [[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
 
 
 @Client.on_message(filters.command("clone") & filters.private)
@@ -473,7 +678,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             client,
             user_id,
             action="clone_setmsg",
-            back_cb=f"manage_clone#{bot_id}",
+            back_cb=f"clone_viewmsg#{bot_id}",
             data={"bot_id": bot_id},
         )
         current_msg = clone_doc.get("start_msg")
@@ -490,7 +695,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
         await send_or_edit_text(
             query,
             text,
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_viewmsg#{bot_id}")]]),
         )
         return True
 
@@ -510,7 +715,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             running.custom_start_txt = None
         await query.answer("✅ Reset to default start message!", show_alert=True)
         clone_doc = await clone_db.get_clone(bot_id)
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
+        await show_msg_view(query, clone_doc)
         return True
 
     if data.startswith("clone_setpic#"):
@@ -524,7 +729,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             client,
             user_id,
             action="clone_setpic",
-            back_cb=f"manage_clone#{bot_id}",
+            back_cb=f"clone_viewpic#{bot_id}",
             data={"bot_id": bot_id},
         )
         text = (
@@ -535,7 +740,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
         await send_or_edit_text(
             query,
             text,
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_viewpic#{bot_id}")]]),
         )
         return True
 
@@ -556,7 +761,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             running.custom_start_pic_bytes = None
         await query.answer("✅ Start picture removed!", show_alert=True)
         clone_doc = await clone_db.get_clone(bot_id)
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
+        await show_pic_view(client, query, clone_doc)
         return True
 
     if data.startswith("clone_setbtns#"):
@@ -570,7 +775,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             client,
             user_id,
             action="clone_setbtns",
-            back_cb=f"manage_clone#{bot_id}",
+            back_cb=f"clone_viewbtns#{bot_id}",
             data={"bot_id": bot_id},
         )
         text = (
@@ -584,7 +789,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
         await send_or_edit_text(
             query,
             text,
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]),
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_viewbtns#{bot_id}")]]),
         )
         return True
 
@@ -604,7 +809,187 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             running.custom_start_buttons = []
         await query.answer("✅ All custom buttons removed!", show_alert=True)
         clone_doc = await clone_db.get_clone(bot_id)
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
+        await show_btns_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_appearance#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await clear_pending_input(client, user_id)
+        await show_appearance_menu(query, clone_doc)
+        return True
+
+    if data.startswith("clone_viewpic#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await show_pic_view(client, query, clone_doc)
+        return True
+
+    if data.startswith("clone_viewmsg#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await show_msg_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_viewbtns#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await show_btns_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_about_view#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await clear_pending_input(client, user_id)
+        await show_about_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_setabout#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await set_pending_input(client, user_id, action="clone_setabout", back_cb=f"clone_about_view#{bot_id}", data={"bot_id": bot_id})
+        text = (
+            "<b>📝 Send Your Custom About Text</b>\n\n"
+            "This will replace the top part of your About page.\n"
+            f"The footer line (\"Cʟᴏɴᴇ Fʀᴏᴍ: @{MAIN_BOT_USERNAME}\") will still be added automatically — you don't need to include it.\n\n"
+            "HTML formatting is supported. Send /cancel to cancel."
+        )
+        await send_or_edit_text(query, text, InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_about_view#{bot_id}")]]))
+        return True
+
+    if data.startswith("clone_delabout#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        if not clone_doc.get("about_text"):
+            await query.answer("ℹ️ Already using the default About text.", show_alert=True)
+            return True
+        await clone_db.update_clone_settings(bot_id, {"about_text": None})
+        running = RUNNING_CLONES.get(bot_id)
+        if running:
+            running.custom_about_txt = None
+        await query.answer("✅ Reset to default About text!", show_alert=True)
+        clone_doc = await clone_db.get_clone(bot_id)
+        await show_about_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_help_view#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await clear_pending_input(client, user_id)
+        await show_help_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_sethelp#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await set_pending_input(client, user_id, action="clone_sethelp", back_cb=f"clone_help_view#{bot_id}", data={"bot_id": bot_id})
+        text = (
+            "<b>📝 Send Your Custom Help Text</b>\n\n"
+            "This will replace the text shown when users tap \"Help\" on your clone bot.\n\n"
+            "HTML formatting is supported. Send /cancel to cancel."
+        )
+        await send_or_edit_text(query, text, InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_help_view#{bot_id}")]]))
+        return True
+
+    if data.startswith("clone_delhelp#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        if not clone_doc.get("help_text"):
+            await query.answer("ℹ️ Already using the default Help text.", show_alert=True)
+            return True
+        await clone_db.update_clone_settings(bot_id, {"help_text": None})
+        running = RUNNING_CLONES.get(bot_id)
+        if running:
+            running.custom_help_txt = None
+        await query.answer("✅ Reset to default Help text!", show_alert=True)
+        clone_doc = await clone_db.get_clone(bot_id)
+        await show_help_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_filebtns_view#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await clear_pending_input(client, user_id)
+        await show_filebtns_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_setfilebtns#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await set_pending_input(client, user_id, action="clone_setfilebtns", back_cb=f"clone_filebtns_view#{bot_id}", data={"bot_id": bot_id})
+        text = (
+            "<b>🔘 Send Your File Delivery Buttons</b>\n\n"
+            "These buttons will appear <b>under every file</b> your bot delivers to users "
+            "(this is separate from the Start Buttons shown on /start).\n\n"
+            "<b>Format</b> (one row per line, use <code>|</code> for multiple buttons in one row):\n"
+            "<code>Join Channel - https://t.me/YourChannel</code>\n"
+            "<code>Website - https://example.com | Support - https://t.me/YourSupport</code>\n\n"
+            "Send /cancel to cancel."
+        )
+        await send_or_edit_text(query, text, InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_filebtns_view#{bot_id}")]]))
+        return True
+
+    if data.startswith("clone_delfilebtns#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        if not clone_doc.get("file_buttons"):
+            await query.answer("ℹ️ No file delivery buttons are set.", show_alert=True)
+            return True
+        await clone_db.update_clone_settings(bot_id, {"file_buttons": []})
+        running = RUNNING_CLONES.get(bot_id)
+        if running:
+            running.custom_file_buttons = []
+        await query.answer("✅ All file delivery buttons removed!", show_alert=True)
+        clone_doc = await clone_db.get_clone(bot_id)
+        await show_filebtns_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_details#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await show_clone_details(query, clone_doc)
         return True
 
     if data.startswith("clone_toggle#"):
@@ -768,7 +1153,7 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
 
         wait_msg = await message.reply_text("<i>⏳ Verifying token and starting your clone bot, please wait...</i>")
         try:
-            me = await start_clone(token, user_id)
+            me = await start_clone(token, user_id, owner_mention=message.from_user.mention)
         except Exception as e:
             await wait_msg.edit_text(
                 f"❌ <b>Failed to create clone:</b>\n<code>{e}</code>\n\n"
@@ -819,7 +1204,7 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
         await wait_pic.edit_text("✅ Start picture updated successfully!")
         clone_doc = await clone_db.get_clone(target_bot_id)
         if clone_doc:
-            await show_manage_clone_panel(message, clone_doc, is_callback=False)
+            await show_pic_view(client, message, clone_doc)
         await message.stop_propagation()
         return
 
@@ -840,7 +1225,7 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
         await message.reply_text("✅ Start message updated successfully!")
         clone_doc = await clone_db.get_clone(target_bot_id)
         if clone_doc:
-            await show_manage_clone_panel(message, clone_doc, is_callback=False)
+            await show_msg_view(message, clone_doc)
         await message.stop_propagation()
         return
 
@@ -873,7 +1258,82 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
         await message.reply_text("✅ Custom start buttons updated successfully!")
         clone_doc = await clone_db.get_clone(target_bot_id)
         if clone_doc:
-            await show_manage_clone_panel(message, clone_doc, is_callback=False)
+            await show_btns_view(message, clone_doc)
+        await message.stop_propagation()
+        return
+
+    if action == "clone_setabout":
+        target_bot_id = int(data["bot_id"])
+        if not message.text:
+            await message.reply_text("❌ Please send a text message (or /cancel to cancel).", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+
+        PENDING_INPUTS.pop(state_key, None)
+        new_about = message.text
+        await clone_db.update_clone_settings(target_bot_id, {"about_text": new_about})
+        running = RUNNING_CLONES.get(target_bot_id)
+        if running:
+            running.custom_about_txt = new_about
+
+        await message.reply_text("✅ About text updated successfully!")
+        clone_doc = await clone_db.get_clone(target_bot_id)
+        if clone_doc:
+            await show_about_view(message, clone_doc)
+        await message.stop_propagation()
+        return
+
+    if action == "clone_sethelp":
+        target_bot_id = int(data["bot_id"])
+        if not message.text:
+            await message.reply_text("❌ Please send a text message (or /cancel to cancel).", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+
+        PENDING_INPUTS.pop(state_key, None)
+        new_help = message.text
+        await clone_db.update_clone_settings(target_bot_id, {"help_text": new_help})
+        running = RUNNING_CLONES.get(target_bot_id)
+        if running:
+            running.custom_help_txt = new_help
+
+        await message.reply_text("✅ Help text updated successfully!")
+        clone_doc = await clone_db.get_clone(target_bot_id)
+        if clone_doc:
+            await show_help_view(message, clone_doc)
+        await message.stop_propagation()
+        return
+
+    if action == "clone_setfilebtns":
+        target_bot_id = int(data["bot_id"])
+        if not message.text:
+            await message.reply_text("❌ Please send button text and links (or /cancel to cancel).", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+
+        try:
+            parsed_buttons = parse_custom_buttons(message.text)
+        except ValueError as e:
+            await message.reply_text(
+                f"❌ {e}\n\n"
+                "Example format:\n"
+                "<code>Join Channel - https://t.me/YourChannel</code>\n"
+                "<code>Site - https://example.com | Support - https://t.me/Support</code>",
+                reply_markup=back_markup,
+            )
+            await message.stop_propagation()
+            return
+
+        PENDING_INPUTS.pop(state_key, None)
+        await clone_db.update_clone_settings(target_bot_id, {"file_buttons": parsed_buttons})
+        running = RUNNING_CLONES.get(target_bot_id)
+        if running:
+            running.custom_file_buttons = parsed_buttons
+
+        await message.reply_text("✅ File delivery buttons updated successfully!")
+        clone_doc = await clone_db.get_clone(target_bot_id)
+        if clone_doc:
+            await show_filebtns_view(message, clone_doc)
         await message.stop_propagation()
         return
 
