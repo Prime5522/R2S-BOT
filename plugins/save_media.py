@@ -29,6 +29,12 @@ def extract_media_info(msg: Message):
             "file_name": msg.audio.file_name or "Audio.mp3",
             "file_size": humanbytes(msg.audio.file_size),
         }
+    if msg.photo:
+        return {
+            "file_id": msg.photo.file_id,
+            "file_name": "Photo.jpg",
+            "file_size": humanbytes(msg.photo.file_size),
+        }
     return None
 
 
