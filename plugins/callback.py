@@ -96,19 +96,30 @@ async def cb_handler(client: Client, query: CallbackQuery):
             bot_mention = getattr(client, "mention", None) or (await client.get_me()).mention
             bot_name = getattr(client, "first_name", None) or (await client.get_me()).first_name
             bot_username = getattr(client, "username", None) or (await client.get_me()).username
-            about_text = (
-                f"<b>╔══❰ 🤖 About {bot_mention} ❱══❍</b>\n"
-                f"<b>║</b>\n"
-                f"<b>║ 🤖 Bot Name:</b> {bot_name}\n"
-                f"<b>║ 🔗 Username:</b> @{bot_username}\n"
-                f"<b>║ 📁 Service:</b> Fast &amp; Secure File Storage\n"
-                f"<b>║ 🗣️ Language:</b> Python\n"
-                f"<b>║ 📚 Library:</b> Pyrogram\n"
-                f"<b>║ ✨ Cloned From:</b> <a href='https://t.me/{MAIN_BOT_USERNAME}'>@{MAIN_BOT_USERNAME}</a>\n"
-                f"<b>║</b>\n"
-                f"<b>╚══════════════════════❍</b>\n\n"
-                f"<i>Want your own File Storage Bot? Tap \"Create Your Own Clone\" on the Home screen!</i>"
-            )
+
+            custom_about = getattr(client, "custom_about_txt", None)
+            if custom_about:
+                top_block = custom_about
+            else:
+                owner_mention = getattr(client, "owner_mention", None)
+                owner_line = f"<b>║ 👤 Owner:</b> {owner_mention}\n" if owner_mention else ""
+                top_block = (
+                    f"<b>╔══❰ 🤖 About {bot_mention} ❱══❍</b>\n"
+                    f"<b>║</b>\n"
+                    f"<b>║ 🤖 Bot Name:</b> {bot_name}\n"
+                    f"<b>║ 🔗 Username:</b> @{bot_username}\n"
+                    f"{owner_line}"
+                    f"<b>║ 📁 Service:</b> Fast &amp; Secure File Storage\n"
+                    f"<b>║ 🗣️ Language:</b> Python\n"
+                    f"<b>║ 📚 Library:</b> Pyrogram\n"
+                    f"<b>║</b>\n"
+                    f"<b>╚══════════════════════❍</b>"
+                )
+
+            # ✨ এই লাইনটা ফিক্সড — ক্লোন ওনার About টেক্সট যত ইচ্ছা কাস্টমাইজ করুক,
+            # এটা সবসময় সবার নিচে থাকবে, মুছে ফেলা যাবে না।
+            fixed_footer = f"\n\n✨ <b>Cʟᴏɴᴇ Fʀᴏᴍ:</b> <a href='https://t.me/{MAIN_BOT_USERNAME}'>@{MAIN_BOT_USERNAME}</a>"
+            about_text = f"{top_block}{fixed_footer}"
             return await edit_caption_or_text(query, about_text, reply_markup)
 
         me2 = getattr(client, "mention", None) or (await client.get_me()).mention
@@ -158,12 +169,16 @@ async def cb_handler(client: Client, query: CallbackQuery):
         ]]
         reply_markup = InlineKeyboardMarkup(buttons)
         if getattr(client, "is_clone", False):
-            help_text = (
-                "<b>📖 How to Use This Bot</b>\n\n"
-                "• Send any document, video, or audio file to store it and get a shareable link.\n"
-                "• Use <b>Save in Batch</b> to combine multiple files into a single link.\n"
-                "• Bot owner can use <code>/settings</code> to customize start screen, caption, shortener, verification, and Force Subscribe.\n"
-            )
+            custom_help = getattr(client, "custom_help_txt", None)
+            if custom_help:
+                help_text = custom_help
+            else:
+                help_text = (
+                    "<b>📖 How to Use This Bot</b>\n\n"
+                    "• Send any document, video, photo, or audio file to store it and get a shareable link.\n"
+                    "• Use <b>Save in Batch</b> to combine multiple files into a single link.\n"
+                    "• Bot owner can use the \"Create My Own Clone\" panel on the main bot to customize this screen, caption, shortener, verification, and Force Subscribe.\n"
+                )
             return await edit_caption_or_text(query, help_text, reply_markup)
         await edit_caption_or_text(query, script.HELP_TXT, reply_markup)
 
