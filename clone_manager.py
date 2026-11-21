@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 RUNNING_CLONES: dict = {}
 
 
-async def start_clone(bot_token: str, owner_id: int):
+async def start_clone(bot_token: str, owner_id: int, owner_mention: str = None):
     if bot_token.strip() == BOT_TOKEN.strip():
         raise ValueError("You cannot clone the main bot itself! Please create a new bot in @BotFather.")
 
@@ -72,6 +72,7 @@ async def start_clone(bot_token: str, owner_id: int):
         bot_token=bot_token,
         db_name=db_name,
         status="active",
+        owner_mention=owner_mention,
     )
 
     clone_client.is_clone = True
@@ -86,6 +87,10 @@ async def start_clone(bot_token: str, owner_id: int):
     clone_client.custom_start_pic_bytes = bytes(raw_pic_bytes) if raw_pic_bytes else None
     clone_client.custom_start_txt = clone_doc.get("start_msg")
     clone_client.custom_start_buttons = clone_doc.get("start_buttons") or []
+    clone_client.custom_about_txt = clone_doc.get("about_text")
+    clone_client.custom_help_txt = clone_doc.get("help_text")
+    clone_client.custom_file_buttons = clone_doc.get("file_buttons") or []
+    clone_client.owner_mention = clone_doc.get("owner_mention")
 
     RUNNING_CLONES[bot_id] = clone_client
     logger.info(f"Clone started: @{me.username} ({bot_id}) owner={owner_id}")
@@ -125,3 +130,4 @@ async def load_all_clones():
             await start_clone(c["bot_token"], c["owner_id"])
         except (RPCError, Exception) as e:
             logger.error(f"Failed to restore clone @{c.get('bot_username')}: {e}")
+            
