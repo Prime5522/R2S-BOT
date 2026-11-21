@@ -12,6 +12,21 @@ from plugins.verification import handle_verify_case, av_verification
 from plugins.clone import build_start_content, send_clone_entry, send_start_reply_safely
 
 
+def build_file_delivery_markup(bot: Client, base_rows: list = None):
+    """
+    ✨ ফাইল ডেলিভারি বাটন: ক্লোন ওনার Manage Clone প্যানেল থেকে যে বাটন(গুলো)
+    সেট করেছে, সেগুলো প্রতিটা ফাইল ডেলিভারির নিচে (base_rows — যেমন main
+    বটের স্ট্রিম বাটন — এর পরে) জুড়ে দেয়। কিছু সেট না থাকলে শুধু base_rows-ই যাবে।
+    """
+    rows = list(base_rows or [])
+    custom_rows = getattr(bot, "custom_file_buttons", None) or []
+    for row in custom_rows:
+        btn_row = [InlineKeyboardButton(b["text"], url=b["url"]) for b in row if b.get("text") and b.get("url")]
+        if btn_row:
+            rows.append(btn_row)
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
 async def get_caption(cur_db, user_id: int, file_name: str, file_size: str):
     user = await cur_db.get_user(user_id)
     caption = user.get("custom_caption")
@@ -39,6 +54,9 @@ async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int)
         elif file_msg.audio:
             file_name = file_msg.audio.file_name
             file_size = humanbytes(file_msg.audio.file_size)
+        elif file_msg.photo:
+            file_name = "Photo.jpg"
+            file_size = humanbytes(file_msg.photo.file_size)
         else:
             file_name = "Unknown"
             file_size = "0 B"
@@ -47,15 +65,14 @@ async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int)
         owner = await cur_db.get_user(owner_uid)
         protect = owner.get("protect_content", False)
 
+        base_rows = [[InlineKeyboardButton('✛ Watch & Download ✛', callback_data=f'stream#{file_id}')]]
         return await bot.copy_message(
             chat_id=user_id,
             from_chat_id=DB_CHANNEL,
             message_id=file_id,
             caption=caption,
             protect_content=protect,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton('✛ Watch & Download ✛', callback_data=f'stream#{file_id}')]]
-            )
+            reply_markup=build_file_delivery_markup(bot, base_rows)
         )
 
     except FloodWait as e:
@@ -74,6 +91,7 @@ async def send_cached_clone_item(bot: Client, user_id: int, item: dict, owner_ui
                 file_id=item["file_id"],
                 caption=caption,
                 protect_content=protect,
+                reply_markup=build_file_delivery_markup(bot),
             )
         except FloodWait as e:
             await asyncio.sleep(e.value)
