@@ -47,7 +47,7 @@ async def av_verification(client, message, owner_uid: int = None):
     return True
 
 
-@Client.on_message((filters.document | filters.video | filters.audio) & ~filters.chat(DB_CHANNEL))
+@Client.on_message((filters.document | filters.video | filters.audio | filters.photo) & ~filters.chat(DB_CHANNEL))
 async def main(bot: Client, message):
     db = get_db(bot)
 
