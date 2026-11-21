@@ -13,23 +13,31 @@ class CloneDB:
         bot_token: str,
         db_name: str,
         status: str = "active",
+        owner_mention: str = None,
     ):
+        set_fields = {
+            "owner_id": int(owner_id),
+            "bot_id": int(bot_id),
+            "bot_username": bot_username,
+            "bot_token": bot_token,
+            "db_name": db_name,
+            "status": status,
+        }
+        if owner_mention:
+            set_fields["owner_mention"] = owner_mention
+
         await self.clones.update_one(
             {"bot_id": int(bot_id)},
             {
-                "$set": {
-                    "owner_id": int(owner_id),
-                    "bot_id": int(bot_id),
-                    "bot_username": bot_username,
-                    "bot_token": bot_token,
-                    "db_name": db_name,
-                    "status": status,
-                },
+                "$set": set_fields,
                 "$setOnInsert": {
                     "start_pic": None,
                     "start_pic_bytes": None,
                     "start_msg": None,
                     "start_buttons": [],
+                    "about_text": None,
+                    "help_text": None,
+                    "file_buttons": [],
                 },
             },
             upsert=True,
