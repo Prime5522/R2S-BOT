@@ -1,1066 +1,824 @@
-import io
-import re
-from bson.binary import Binary
-from pyrogram import Client, filters, enums
-from pyrogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
-from config import MAIN_BOT_USERNAME, MAX_CLONE_PER_USER, PICS
+import asyncio, time
+from pyrogram import Client, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import FloodWait
+from config import *
+from utils import get_hash
 from Script import script
-from database import get_db, get_clone_database
+from plugins.save_media import save_batch_media_in_channel, save_media_in_channel
 from database.clonedb import clone_db
-from clone_manager import start_clone, stop_clone, restart_clone, delete_clone, RUNNING_CLONES
-
-# Per-(bot_id, user_id) input state store — completely isolated across users
-PENDING_INPUTS: dict = {}
-
-DEFAULT_CLONE_START_TXT = (
-    "<b>Hello {mention} 👋,\n\n"
-    "Welcome to {bot_mention}!\n"
-    "I am your personal File Storage Bot. 📁\n"
-    "Send me any file, document, video, or audio and I will store it and generate a shareable link.\n\n"
-    "👇 Use the buttons below to explore or create your own clone bot!</b>"
+from plugins.clone import (
+    build_start_content,
+    handle_clone_callback,
+    set_pending_input,
+    clear_pending_input,
+    resolve_target_db,
+    resolve_target_client,
+    send_or_edit_text,
+    send_start_reply_safely,
 )
 
 
-async def get_client_bot_id(client: Client) -> int:
-    bot_id = getattr(client, "bot_id", None)
-    if not bot_id:
-        me = await client.get_me()
-        bot_id = me.id
-        client.bot_id = bot_id
-        client.username = me.username
-        client.mention = me.mention
-        client.first_name = me.first_name
-    return bot_id
-
-
-async def set_pending_input(client: Client, user_id: int, action: str, back_cb: str, data: dict = None):
-    bot_id = await get_client_bot_id(client)
-    PENDING_INPUTS[(bot_id, int(user_id))] = {
-        "action": action,
-        "back_cb": back_cb,
-        "data": data or {},
-    }
-
-
-async def clear_pending_input(client: Client, user_id: int):
-    bot_id = await get_client_bot_id(client)
-    PENDING_INPUTS.pop((bot_id, int(user_id)), None)
-
-
-async def resolve_target_db(client: Client, clone_bot_id: int = None):
-    if clone_bot_id:
-        clone_doc = await clone_db.get_clone(int(clone_bot_id))
-        if clone_doc:
-            return get_clone_database(int(clone_bot_id), clone_doc["db_name"])
-    return get_db(client)
-
-
-async def resolve_target_client(client: Client, clone_bot_id: int = None):
-    if clone_bot_id:
-        running = RUNNING_CLONES.get(int(clone_bot_id))
-        if running:
-            return running
-    return client
-
-
-async def send_or_edit_text(
-    query: CallbackQuery,
-    text: str,
-    reply_markup: InlineKeyboardMarkup = None,
-    disable_web_page_preview: bool = True,
-):
-    if query.message.text:
+async def safe_send_cached_media(client, chat_id, file_id):
+    while True:
         try:
-            return await query.message.edit_text(
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=enums.ParseMode.HTML,
-                disable_web_page_preview=disable_web_page_preview,
-            )
-        except Exception:
-            pass
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
-    return await query.message.reply_text(
+            return await client.send_cached_media(chat_id=chat_id, file_id=file_id)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+
+
+async def get_real_file_id(client, msg_id):
+    msg = await client.get_messages(DB_CHANNEL, msg_id)
+    media = msg.document or msg.video or msg.audio or msg.photo
+    if not media:
+        return None
+    return media.file_id
+
+
+def parse_settings_target(data: str, fallback_uid: int):
+    parts = data.split("#")
+    target_uid = int(parts[1]) if len(parts) > 1 and parts[1] else fallback_uid
+    clone_bot_id = int(parts[2]) if len(parts) > 2 and parts[2] else None
+    return target_uid, clone_bot_id
+
+
+def parse_toggle_target(data: str, fallback_uid: int):
+    parts = data.split("#")
+    target_uid = int(parts[1]) if len(parts) > 1 and parts[1] else fallback_uid
+    status = parts[2] if len(parts) > 2 else "False"
+    clone_bot_id = int(parts[3]) if len(parts) > 3 and parts[3] else None
+    return target_uid, status, clone_bot_id
+
+
+def build_suffix(target_uid: int, clone_bot_id: int = None) -> str:
+    return f"{target_uid}#{clone_bot_id}" if clone_bot_id else f"{target_uid}"
+
+
+def build_back_cb(target_uid: int, clone_bot_id: int = None) -> str:
+    if clone_bot_id:
+        return f"manage_clone#{clone_bot_id}"
+    return f"settings#{target_uid}"
+
+
+async def edit_caption_or_text(query: CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup):
+    if query.message.photo:
+        return await query.message.edit_caption(
+            caption=text,
+            reply_markup=reply_markup,
+            parse_mode=enums.ParseMode.HTML,
+        )
+    return await query.message.edit_text(
         text=text,
-        reply_markup=reply_markup,
-        parse_mode=enums.ParseMode.HTML,
-        disable_web_page_preview=disable_web_page_preview,
-    )
-
-
-def format_start_text(template: str, user_mention: str, bot_mention: str) -> str:
-    try:
-        if "{mention}" in template or "{bot_mention}" in template:
-            return template.format(mention=user_mention, bot_mention=bot_mention)
-        if "{}" in template:
-            if template.count("{}") >= 2:
-                return template.format(user_mention, bot_mention)
-            return template.format(user_mention)
-        return template
-    except Exception:
-        return template
-
-
-async def build_start_content(client: Client, user_mention: str):
-    bot_mention = getattr(client, "mention", None)
-    if not bot_mention:
-        me = await client.get_me()
-        bot_mention = me.mention
-        client.bot_id = me.id
-        client.username = me.username
-        client.mention = me.mention
-        client.first_name = me.first_name
-
-    if getattr(client, "is_clone", False):
-        start_pic = getattr(client, "custom_start_pic", None)
-        start_pic_bytes = getattr(client, "custom_start_pic_bytes", None)
-        custom_txt = getattr(client, "custom_start_txt", None)
-        template = custom_txt if custom_txt else DEFAULT_CLONE_START_TXT
-        caption_text = format_start_text(template, user_mention, bot_mention)
-
-        buttons = [
-            [
-                InlineKeyboardButton("• Help •", callback_data="help"),
-                InlineKeyboardButton("• About •", callback_data="about"),
-            ],
-            [
-                InlineKeyboardButton(
-                    "✨ Create Your Own Clone",
-                    url=f"https://t.me/{MAIN_BOT_USERNAME}?start=clone",
-                )
-            ],
-        ]
-
-        custom_buttons = getattr(client, "custom_start_buttons", None) or []
-        for row in custom_buttons:
-            btn_row = [
-                InlineKeyboardButton(b["text"], url=b["url"])
-                for b in row
-                if b.get("text") and b.get("url")
-            ]
-            if btn_row:
-                buttons.append(btn_row)
-
-        return start_pic, start_pic_bytes, caption_text, InlineKeyboardMarkup(buttons)
-
-    start_pic = PICS if PICS else None
-    caption_text = format_start_text(script.START_TXT, user_mention, bot_mention)
-    buttons = [
-        [
-            InlineKeyboardButton("• Updates •", url="https://t.me/PrimeXBots"),
-            InlineKeyboardButton("• Support •", url="https://t.me/Prime_Support_group"),
-        ],
-        [
-            InlineKeyboardButton("• Help •", callback_data="help"),
-            InlineKeyboardButton("• About •", callback_data="about"),
-        ],
-        [
-            InlineKeyboardButton("✨ Create / Manage Clone", callback_data="create_clone"),
-        ],
-    ]
-    return start_pic, None, caption_text, InlineKeyboardMarkup(buttons)
-
-
-async def send_start_reply_safely(
-    client: Client,
-    reply_target: Message,
-    start_pic,
-    start_pic_bytes,
-    caption_text: str,
-    reply_markup: InlineKeyboardMarkup,
-):
-    if start_pic:
-        try:
-            return await reply_target.reply_photo(
-                photo=start_pic,
-                caption=caption_text,
-                reply_markup=reply_markup,
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception:
-            if getattr(client, "is_clone", False):
-                client.custom_start_pic = None
-
-    if start_pic_bytes:
-        try:
-            bio = io.BytesIO(start_pic_bytes)
-            bio.name = "start.jpg"
-            sent = await reply_target.reply_photo(
-                photo=bio,
-                caption=caption_text,
-                reply_markup=reply_markup,
-                parse_mode=enums.ParseMode.HTML,
-            )
-            if sent.photo and getattr(client, "is_clone", False):
-                new_fid = sent.photo.file_id
-                client.custom_start_pic = new_fid
-                await clone_db.update_clone_settings(client.bot_id, {"start_pic": new_fid})
-            return sent
-        except Exception:
-            pass
-
-    return await reply_target.reply_text(
-        text=caption_text,
         reply_markup=reply_markup,
         parse_mode=enums.ParseMode.HTML,
         disable_web_page_preview=True,
     )
 
 
-def parse_custom_buttons(raw_text: str):
-    rows = []
-    for line in raw_text.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        row = []
-        for part in line.split("|"):
-            part = part.strip()
-            if " - " in part:
-                text, url = part.rsplit(" - ", 1)
-            else:
-                m = re.match(r"^(.*?)\s*-\s*((?:https?|tg)://\S+)$", part)
-                if not m:
-                    raise ValueError(f"Invalid format: <code>{part}</code>")
-                text, url = m.group(1), m.group(2)
-            text = text.strip()
-            url = url.strip()
-            if not text or not re.match(r"^(https?|tg)://\S+$", url):
-                raise ValueError(f"Invalid button text or URL: <code>{part}</code>")
-            row.append({"text": text, "url": url})
-        if row:
-            rows.append(row)
-    if not rows:
-        raise ValueError("No valid buttons found.")
-    return rows
+@Client.on_callback_query()
+async def cb_handler(client: Client, query: CallbackQuery):
+    if await handle_clone_callback(client, query):
+        return
 
-
-async def send_clone_entry(client: Client, target, is_callback: bool = False):
-    user_id = target.from_user.id
-
-    if getattr(client, "is_clone", False):
-        text = (
-            "<b>✨ Create or Manage Your Clone Bot</b>\n\n"
-            "Clone creation and customization are managed on our main bot.\n"
-            "Click the button below to continue:"
-        )
-        markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🚀 Open Clone Panel", url=f"https://t.me/{MAIN_BOT_USERNAME}?start=clone")]]
-        )
-        if is_callback:
-            return await send_or_edit_text(target, text, markup)
-        return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
-
-    await clear_pending_input(client, user_id)
-    existing = await clone_db.get_user_clone(user_id)
-
-    if existing:
-        bot_id = existing["bot_id"]
-        bot_username = existing.get("bot_username") or "Unknown"
-        status = existing.get("status", "active")
-        status_label = "✅ Active" if status == "active" else "⛔ Inactive"
-        has_msg = "Custom" if existing.get("start_msg") else "Default"
-        has_pic = "Set" if (existing.get("start_pic") or existing.get("start_pic_bytes")) else "None"
-        btn_count = sum(len(r) for r in (existing.get("start_buttons") or []))
-
-        text = (
-            "<b>🤖 Your Cloned Bot</b>\n\n"
-            "You already have a cloned bot connected to your account.\n"
-            f"<i>(Limit: {MAX_CLONE_PER_USER} clone per user)</i>\n\n"
-            f"• <b>Bot:</b> @{bot_username}\n"
-            f"• <b>Status:</b> {status_label}\n"
-            f"• <b>Start Message:</b> {has_msg}\n"
-            f"• <b>Start Picture:</b> {has_pic}\n"
-            f"• <b>Custom Buttons:</b> {btn_count}\n\n"
-            "👇 Tap your bot's button below to customize and manage all settings:"
-        )
-        buttons = [
-            [InlineKeyboardButton(f"🤖 @{bot_username}", callback_data=f"manage_clone#{bot_id}")],
-        ]
-        if is_callback:
-            buttons.append([InlineKeyboardButton("« Back", callback_data="start")])
-        else:
-            buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_data")])
-
-        markup = InlineKeyboardMarkup(buttons)
-        if is_callback:
-            return await send_or_edit_text(target, text, markup)
-        return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
-
-    back_cb = "start" if is_callback else "close_data"
-    await set_pending_input(client, user_id, action="awaiting_botfather_forward", back_cb=back_cb)
-
-    text = (
-        "<b>✨ Create Your Own Clone Bot</b>\n\n"
-        "Follow these quick steps to create your personal File Store Bot:\n\n"
-        "1️⃣ Open @BotFather and create a new bot with <code>/newbot</code> (or open an existing bot's token message).\n"
-        "2️⃣ <b>Forward</b> the message containing the Bot Token from @BotFather directly to this chat.\n\n"
-        "⚠️ <i>Do not send the token as plain text — you must forward the original message from @BotFather.</i>\n\n"
-        "Send /cancel anytime to cancel."
-    )
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="clone_cancel_input")]])
-    if is_callback:
-        return await send_or_edit_text(target, text, markup)
-    return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
-
-
-async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = True):
-    bot_id = clone_doc["bot_id"]
-    owner_id = int(clone_doc["owner_id"])
-    bot_username = clone_doc.get("bot_username") or "Unknown"
-    status = clone_doc.get("status", "active")
-    status_label = "✅ Active" if status == "active" else "⛔ Inactive"
-    toggle_label = "⛔ Deactivate" if status == "active" else "✅ Activate"
-
-    has_msg = bool(clone_doc.get("start_msg"))
-    has_pic = bool(clone_doc.get("start_pic") or clone_doc.get("start_pic_bytes"))
-    saved_btns = clone_doc.get("start_buttons") or []
-    btn_count = sum(len(r) for r in saved_btns)
-
-    clone_user_db = get_clone_database(int(bot_id), clone_doc["db_name"])
-    owner_settings = await clone_user_db.get_user(owner_id)
-    has_caption = "Custom" if owner_settings.get("custom_caption") else "Default"
-    protect_on = bool(owner_settings.get("protect_content", False))
-    has_short = "Set" if owner_settings.get("shortener_api") else "None"
-    verify_on = "ON" if owner_settings.get("verify") else "OFF"
-    fsub_count = len(owner_settings.get("fsub_channels") or [])
-    has_log = "Set" if owner_settings.get("log_channel") else "None"
-
-    text = (
-        f"<b>🛠 Clone Customization — @{bot_username}</b>\n\n"
-        f"• <b>Bot Status:</b> {status_label}\n\n"
-        "<b>🎨 Start Appearance:</b>\n"
-        f"• <b>Start Message:</b> {'Custom' if has_msg else 'Default'} — <i>Replaces default /start text</i>\n"
-        f"• <b>Start Picture:</b> {'Set' if has_pic else 'None'} — <i>Shown on /start</i>\n"
-        f"• <b>Start Buttons:</b> {btn_count} — <i>Shown below default buttons</i>\n\n"
-        "<b>⚙️ File &amp; Bot Settings:</b>\n"
-        f"• <b>Caption:</b> {has_caption}  |  <b>Protect:</b> {'ON ✅' if protect_on else 'OFF ❌'}\n"
-        f"• <b>Shortener:</b> {has_short}  |  <b>Verify:</b> {verify_on}\n"
-        f"• <b>Force Sub:</b> {fsub_count} channel(s)  |  <b>Log Channel:</b> {has_log}\n\n"
-        "👇 <i>Tap any button below to customize directly:</i>"
-    )
-
-    buttons = []
-
-    if has_msg:
-        buttons.append([
-            InlineKeyboardButton("✏️ Edit Start Msg", callback_data=f"clone_setmsg#{bot_id}"),
-            InlineKeyboardButton("♻️ Reset Msg", callback_data=f"clone_delmsg#{bot_id}"),
-        ])
-    else:
-        buttons.append([InlineKeyboardButton("📝 Set Start Message", callback_data=f"clone_setmsg#{bot_id}")])
-
-    if has_pic:
-        buttons.append([
-            InlineKeyboardButton("🖼 Change Start Pic", callback_data=f"clone_setpic#{bot_id}"),
-            InlineKeyboardButton("🗑 Remove Pic", callback_data=f"clone_delpic#{bot_id}"),
-        ])
-    else:
-        buttons.append([InlineKeyboardButton("🖼 Set Start Picture", callback_data=f"clone_setpic#{bot_id}")])
-
-    if btn_count > 0:
-        buttons.append([
-            InlineKeyboardButton("🔘 Edit Buttons", callback_data=f"clone_setbtns#{bot_id}"),
-            InlineKeyboardButton("🗑 Clear Buttons", callback_data=f"clone_delbtns#{bot_id}"),
-        ])
-    else:
-        buttons.append([InlineKeyboardButton("🔘 Set Start Buttons", callback_data=f"clone_setbtns#{bot_id}")])
-
-    sfx = f"{owner_id}#{bot_id}"
-    buttons.extend([
-        [
-            InlineKeyboardButton("📝 File Caption", callback_data=f"caption_setgs#{sfx}"),
-            InlineKeyboardButton(
-                f"🛡 Protect: {'ON ✅' if protect_on else 'OFF ❌'}",
-                callback_data=f"clone_quick_protect#{bot_id}",
-            ),
-        ],
-        [
-            InlineKeyboardButton("🔗 Shortener", callback_data=f"shortlink_setgs#{sfx}"),
-            InlineKeyboardButton("✅ Verify Settings", callback_data=f"verify_setgs#{sfx}"),
-        ],
-        [
-            InlineKeyboardButton("📢 Force Sub", callback_data=f"force_channel_setgs#{sfx}"),
-            InlineKeyboardButton("📜 Log Channel", callback_data=f"log_channel_setgs#{sfx}"),
-        ],
-        [
-            InlineKeyboardButton("🎬 Tutorial", callback_data=f"tutorial_setgs#{sfx}"),
-            InlineKeyboardButton("🔗 Perm. Link", callback_data=f"permanent_link_setgs#{sfx}"),
-            InlineKeyboardButton("📑 Details", callback_data=f"user_details#{sfx}"),
-        ],
-        [
-            InlineKeyboardButton("🔁 Restart", callback_data=f"clone_restart#{bot_id}"),
-            InlineKeyboardButton(toggle_label, callback_data=f"clone_toggle#{bot_id}"),
-        ],
-        [
-            InlineKeyboardButton("🗑 Delete Clone", callback_data=f"clone_delete#{bot_id}"),
-            InlineKeyboardButton("« Back", callback_data="clone_card"),
-        ],
-    ])
-
-    markup = InlineKeyboardMarkup(buttons)
-    if is_callback:
-        return await send_or_edit_text(target, text, markup)
-    return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
-
-
-@Client.on_message(filters.command("clone") & filters.private)
-async def clone_command(client: Client, message: Message):
-    return await send_clone_entry(client, message, is_callback=False)
-
-
-async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
-    data = query.data
     user_id = query.from_user.id
 
-    if data == "create_clone" or data == "clone_card":
-        await send_clone_entry(client, query, is_callback=True)
-        return True
+    if query.data == "close_data":
+        await query.message.delete()
 
-    if data == "clone_cancel_input":
+    elif query.data == "about":
+        buttons = [[
+            InlineKeyboardButton('• Home •', callback_data='start'),
+            InlineKeyboardButton('• Close •', callback_data='close_data')
+        ]]
+        reply_markup = InlineKeyboardMarkup(buttons)
+
+        if getattr(client, "is_clone", False):
+            bot_mention = getattr(client, "mention", None) or (await client.get_me()).mention
+            bot_name = getattr(client, "first_name", None) or (await client.get_me()).first_name
+            bot_username = getattr(client, "username", None) or (await client.get_me()).username
+            about_text = (
+                f"<b>╔══❰ 🤖 About {bot_mention} ❱══❍</b>\n"
+                f"<b>║</b>\n"
+                f"<b>║ 🤖 Bot Name:</b> {bot_name}\n"
+                f"<b>║ 🔗 Username:</b> @{bot_username}\n"
+                f"<b>║ 📁 Service:</b> Fast &amp; Secure File Storage\n"
+                f"<b>║ 🗣️ Language:</b> Python\n"
+                f"<b>║ 📚 Library:</b> Pyrogram\n"
+                f"<b>║ ✨ Cloned From:</b> <a href='https://t.me/{MAIN_BOT_USERNAME}'>@{MAIN_BOT_USERNAME}</a>\n"
+                f"<b>║</b>\n"
+                f"<b>╚══════════════════════❍</b>\n\n"
+                f"<i>Want your own File Storage Bot? Tap \"Create Your Own Clone\" on the Home screen!</i>"
+            )
+            return await edit_caption_or_text(query, about_text, reply_markup)
+
+        me2 = getattr(client, "mention", None) or (await client.get_me()).mention
+        await edit_caption_or_text(
+            query,
+            script.ABOUT_TXT.format(me2, me2),
+            reply_markup,
+        )
+
+    elif query.data == "start":
         await clear_pending_input(client, user_id)
-        existing = await clone_db.get_user_clone(user_id)
-        if existing:
-            await send_clone_entry(client, query, is_callback=True)
-        else:
-            await send_or_edit_text(
-                query,
-                "❌ Clone creation cancelled.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("« Back to Home", callback_data="start")]]),
-            )
-        return True
+        start_pic, start_pic_bytes, caption_text, reply_markup = await build_start_content(client, query.from_user.mention)
 
-    if data.startswith("manage_clone#"):
-        bot_id = int(data.split("#")[1])
-        await clear_pending_input(client, user_id)
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ This clone does not belong to you.", show_alert=True)
-            return True
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
-        return True
-
-    if data.startswith("clone_quick_protect#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-        clone_user_db = get_clone_database(bot_id, clone_doc["db_name"])
-        owner_settings = await clone_user_db.get_user(user_id)
-        new_val = not bool(owner_settings.get("protect_content", False))
-        await clone_user_db.update_user_info(user_id, {"protect_content": new_val})
-        await query.answer(f"🛡 Content Protection is now {'ON' if new_val else 'OFF'}")
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
-        return True
-
-    if data.startswith("clone_setmsg#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-
-        await set_pending_input(
-            client,
-            user_id,
-            action="clone_setmsg",
-            back_cb=f"manage_clone#{bot_id}",
-            data={"bot_id": bot_id},
-        )
-        current_msg = clone_doc.get("start_msg")
-        current_info = f"\n<b>Current Message:</b>\n<blockquote>{current_msg}</blockquote>\n" if current_msg else ""
-        text = (
-            "<b>📝 Send Your Custom Start Message</b>\n"
-            f"{current_info}\n"
-            "HTML formatting is supported.\n"
-            "Optional placeholders:\n"
-            "• <code>{mention}</code> or <code>{}</code> — User's clickable name\n"
-            "• <code>{bot_mention}</code> — Your bot's name\n\n"
-            "Send /cancel to cancel."
-        )
-        await send_or_edit_text(
-            query,
-            text,
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]),
-        )
-        return True
-
-    if data.startswith("clone_delmsg#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-        if not clone_doc.get("start_msg"):
-            await query.answer("ℹ️ Already using the default start message.", show_alert=True)
-            return True
-
-        await clone_db.update_clone_settings(bot_id, {"start_msg": None})
-        running = RUNNING_CLONES.get(bot_id)
-        if running:
-            running.custom_start_txt = None
-        await query.answer("✅ Reset to default start message!", show_alert=True)
-        clone_doc = await clone_db.get_clone(bot_id)
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
-        return True
-
-    if data.startswith("clone_setpic#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-
-        await set_pending_input(
-            client,
-            user_id,
-            action="clone_setpic",
-            back_cb=f"manage_clone#{bot_id}",
-            data={"bot_id": bot_id},
-        )
-        text = (
-            "<b>🖼 Send Your Start Picture</b>\n\n"
-            "Send the photo you want to show when users press /start in your clone bot.\n\n"
-            "Send /cancel to cancel."
-        )
-        await send_or_edit_text(
-            query,
-            text,
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]),
-        )
-        return True
-
-    if data.startswith("clone_delpic#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-        if not (clone_doc.get("start_pic") or clone_doc.get("start_pic_bytes")):
-            await query.answer("ℹ️ No start picture is currently set.", show_alert=True)
-            return True
-
-        await clone_db.update_clone_settings(bot_id, {"start_pic": None, "start_pic_bytes": None})
-        running = RUNNING_CLONES.get(bot_id)
-        if running:
-            running.custom_start_pic = None
-            running.custom_start_pic_bytes = None
-        await query.answer("✅ Start picture removed!", show_alert=True)
-        clone_doc = await clone_db.get_clone(bot_id)
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
-        return True
-
-    if data.startswith("clone_setbtns#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-
-        await set_pending_input(
-            client,
-            user_id,
-            action="clone_setbtns",
-            back_cb=f"manage_clone#{bot_id}",
-            data={"bot_id": bot_id},
-        )
-        text = (
-            "<b>🔘 Send Your Custom Start Buttons</b>\n\n"
-            "These buttons will appear <b>below</b> your clone bot's default buttons.\n\n"
-            "<b>Format</b> (one row per line, use <code>|</code> for multiple buttons in one row):\n"
-            "<code>My Channel - https://t.me/YourChannel</code>\n"
-            "<code>Website - https://example.com | Support - https://t.me/YourSupport</code>\n\n"
-            "Send /cancel to cancel."
-        )
-        await send_or_edit_text(
-            query,
-            text,
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]),
-        )
-        return True
-
-    if data.startswith("clone_delbtns#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-        if not clone_doc.get("start_buttons"):
-            await query.answer("ℹ️ No custom buttons are set.", show_alert=True)
-            return True
-
-        await clone_db.update_clone_settings(bot_id, {"start_buttons": []})
-        running = RUNNING_CLONES.get(bot_id)
-        if running:
-            running.custom_start_buttons = []
-        await query.answer("✅ All custom buttons removed!", show_alert=True)
-        clone_doc = await clone_db.get_clone(bot_id)
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
-        return True
-
-    if data.startswith("clone_toggle#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-
-        if clone_doc["status"] == "active":
-            await stop_clone(bot_id)
-            await clone_db.set_status(bot_id, "inactive")
-            await query.answer("⛔ Clone deactivated.")
-        else:
-            try:
-                await start_clone(clone_doc["bot_token"], user_id)
-                await query.answer("✅ Clone activated.")
-            except Exception as e:
-                await query.answer(f"❌ Failed to activate: {e}", show_alert=True)
-                return True
-
-        clone_doc = await clone_db.get_clone(bot_id)
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
-        return True
-
-    if data.startswith("clone_restart#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-
-        await query.answer("🔁 Restarting clone...")
-        try:
-            await restart_clone(bot_id)
-        except Exception as e:
-            await send_or_edit_text(
-                query,
-                f"❌ <b>Restart Failed:</b>\n<code>{e}</code>",
-                InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]),
-            )
-            return True
-
-        clone_doc = await clone_db.get_clone(bot_id)
-        await show_manage_clone_panel(query, clone_doc, is_callback=True)
-        return True
-
-    if data.startswith("clone_delete_confirm#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-
-        await delete_clone(bot_id)
-        await send_or_edit_text(
-            query,
-            "✅ Your cloned bot and all of its data have been permanently deleted.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Back to Home", callback_data="start")]]),
-        )
-        return True
-
-    if data.startswith("clone_delete#"):
-        bot_id = int(data.split("#")[1])
-        clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
-            await query.answer("⚠️ Access denied!", show_alert=True)
-            return True
-
-        btn = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Yes, Delete", callback_data=f"clone_delete_confirm#{bot_id}"),
-            InlineKeyboardButton("❌ No", callback_data=f"manage_clone#{bot_id}"),
-        ]])
-        await send_or_edit_text(
-            query,
-            "⚠️ <b>Are you sure you want to delete your clone?</b>\n\n"
-            "This will permanently stop the cloned bot and erase all of its saved files and user data. This action cannot be undone.",
-            btn,
-        )
-        return True
-
-    return False
-
-
-@Client.on_message(filters.private & ~filters.service, group=-1)
-async def clone_and_settings_input_handler(client: Client, message: Message):
-    if not message.from_user:
-        return
-
-    user_id = message.from_user.id
-    bot_id = await get_client_bot_id(client)
-    state_key = (bot_id, user_id)
-
-    state = PENDING_INPUTS.get(state_key)
-    if not state:
-        return
-
-    if message.text:
-        first_word = message.text.strip().split()[0].lower().split("@")[0]
-        if first_word in ("/start", "/clone", "/settings", "/stats", "/restart", "/broadcast", "/pin_broadcast"):
-            PENDING_INPUTS.pop(state_key, None)
-            return
-
-        if first_word == "/cancel":
-            PENDING_INPUTS.pop(state_key, None)
-            back_cb = state.get("back_cb", "start")
-            await message.reply_text(
-                "❌ Process cancelled.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
-            )
-            await message.stop_propagation()
-            return
-
-    action = state["action"]
-    data = state.get("data", {})
-    back_cb = state.get("back_cb", "start")
-    back_markup = InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]])
-
-    if action == "awaiting_botfather_forward":
-        existing = await clone_db.get_user_clone(user_id)
-        if existing:
-            PENDING_INPUTS.pop(state_key, None)
-            await send_clone_entry(client, message, is_callback=False)
-            await message.stop_propagation()
-            return
-
-        fwd_user = getattr(message, "forward_from", None)
-        if not fwd_user and getattr(message, "forward_origin", None):
-            fwd_user = getattr(message.forward_origin, "sender_user", None)
-
-        is_botfather = bool(
-            fwd_user
-            and (
-                (getattr(fwd_user, "username", None) or "").lower() == "botfather"
-                or getattr(fwd_user, "id", None) == 93372553
-            )
-        )
-        if not is_botfather:
-            await message.reply_text(
-                "❌ <b>Invalid Message!</b>\n\n"
-                "Please <b>forward</b> the token message directly from @BotFather (do not send plain text).\n\n"
-                "Send /cancel to cancel.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="clone_cancel_input")]]),
-            )
-            await message.stop_propagation()
-            return
-
-        raw_text = message.text or message.caption or ""
-        match = re.search(r"\b(\d{6,}:[A-Za-z0-9_-]{30,})\b", raw_text)
-        if not match:
-            await message.reply_text(
-                "❌ Could not find a valid Bot Token in that forwarded message.\n"
-                "Please forward the exact message from @BotFather containing your HTTP API token.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="clone_cancel_input")]]),
-            )
-            await message.stop_propagation()
-            return
-
-        token = match.group(1).strip()
-        PENDING_INPUTS.pop(state_key, None)
-
-        wait_msg = await message.reply_text("<i>⏳ Verifying token and starting your clone bot, please wait...</i>")
-        try:
-            me = await start_clone(token, user_id)
-        except Exception as e:
-            await wait_msg.edit_text(
-                f"❌ <b>Failed to create clone:</b>\n<code>{e}</code>\n\n"
-                "Please check your BotFather token and try again with /clone.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="start")]]),
-            )
-            await message.stop_propagation()
-            return
-
-        await wait_msg.edit_text(
-            f"✨ <b>Successfully Cloned Your Bot!</b>\n\n"
-            f"🤖 <b>Bot:</b> @{me.username}\n\n"
-            f"You can now start @{me.username} or customize it using the button below:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚙️ Customize @{me.username}", callback_data=f"manage_clone#{me.id}")],
-                [InlineKeyboardButton("« Back to Home", callback_data="start")],
-            ]),
-        )
-        await message.stop_propagation()
-        return
-
-    if action == "clone_setpic":
-        target_bot_id = int(data["bot_id"])
-        if not message.photo:
-            await message.reply_text("❌ Please send a valid photo (or /cancel to cancel).", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-
-        wait_pic = await message.reply_text("<i>⏳ Saving start picture...</i>")
-        try:
-            bio = await client.download_media(message.photo, in_memory=True)
-            img_bytes = bio.getvalue()
-        except Exception as e:
-            await wait_pic.edit_text(f"❌ Failed to process picture: <code>{e}</code>", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-
-        PENDING_INPUTS.pop(state_key, None)
-        await clone_db.update_clone_settings(
-            target_bot_id,
-            {"start_pic": None, "start_pic_bytes": Binary(img_bytes)},
-        )
-        running = RUNNING_CLONES.get(target_bot_id)
-        if running:
-            running.custom_start_pic = None
-            running.custom_start_pic_bytes = img_bytes
-
-        await wait_pic.edit_text("✅ Start picture updated successfully!")
-        clone_doc = await clone_db.get_clone(target_bot_id)
-        if clone_doc:
-            await show_manage_clone_panel(message, clone_doc, is_callback=False)
-        await message.stop_propagation()
-        return
-
-    if action == "clone_setmsg":
-        target_bot_id = int(data["bot_id"])
-        if not message.text:
-            await message.reply_text("❌ Please send a text message (or /cancel to cancel).", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-
-        PENDING_INPUTS.pop(state_key, None)
-        new_msg = message.text
-        await clone_db.update_clone_settings(target_bot_id, {"start_msg": new_msg})
-        running = RUNNING_CLONES.get(target_bot_id)
-        if running:
-            running.custom_start_txt = new_msg
-
-        await message.reply_text("✅ Start message updated successfully!")
-        clone_doc = await clone_db.get_clone(target_bot_id)
-        if clone_doc:
-            await show_manage_clone_panel(message, clone_doc, is_callback=False)
-        await message.stop_propagation()
-        return
-
-    if action == "clone_setbtns":
-        target_bot_id = int(data["bot_id"])
-        if not message.text:
-            await message.reply_text("❌ Please send button text and links (or /cancel to cancel).", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-
-        try:
-            parsed_buttons = parse_custom_buttons(message.text)
-        except ValueError as e:
-            await message.reply_text(
-                f"❌ {e}\n\n"
-                "Example format:\n"
-                "<code>My Channel - https://t.me/YourChannel</code>\n"
-                "<code>Site - https://example.com | Support - https://t.me/Support</code>",
-                reply_markup=back_markup,
-            )
-            await message.stop_propagation()
-            return
-
-        PENDING_INPUTS.pop(state_key, None)
-        await clone_db.update_clone_settings(target_bot_id, {"start_buttons": parsed_buttons})
-        running = RUNNING_CLONES.get(target_bot_id)
-        if running:
-            running.custom_start_buttons = parsed_buttons
-
-        await message.reply_text("✅ Custom start buttons updated successfully!")
-        clone_doc = await clone_db.get_clone(target_bot_id)
-        if clone_doc:
-            await show_manage_clone_panel(message, clone_doc, is_callback=False)
-        await message.stop_propagation()
-        return
-
-    target_uid = int(data["target_uid"])
-    clone_bot_id = data.get("clone_bot_id")
-    cur_db = await resolve_target_db(client, clone_bot_id)
-
-    if action == "set_caption":
-        if not message.text:
-            await message.reply_text("❌ Please send a valid caption text.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-        try:
-            message.text.format(file_name="file_name", file_size="file_size")
-        except Exception as e:
-            PENDING_INPUTS.pop(state_key, None)
-            await message.reply_text(f"❌ Invalid format placeholder used: <code>{e}</code>", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-
-        PENDING_INPUTS.pop(state_key, None)
-        await cur_db.update_user_info(target_uid, {"custom_caption": message.text})
-        await message.reply_text(
-            f"✅ Successfully updated file caption:\n\n{message.text}",
-            disable_web_page_preview=True,
-            reply_markup=back_markup,
-        )
-        await message.stop_propagation()
-        return
-
-    if action == "set_shortlink_url":
-        if not message.text:
-            await message.reply_text("❌ Please send a valid shortener domain/URL.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-        PENDING_INPUTS[state_key] = {
-            "action": "set_shortlink_api",
-            "back_cb": back_cb,
-            "data": {"target_uid": target_uid, "clone_bot_id": clone_bot_id, "url": message.text.strip()},
-        }
-        await message.reply_text("🔑 Now send your Shortener API key (or /cancel to cancel):")
-        await message.stop_propagation()
-        return
-
-    if action == "set_shortlink_api":
-        if not message.text:
-            await message.reply_text("❌ Please send a valid API key.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-        PENDING_INPUTS.pop(state_key, None)
-        await cur_db.update_user_info(
-            target_uid,
-            {"base_site": data["url"], "shortener_api": message.text.strip()},
-        )
-        await message.reply_text("✅ Successfully configured shortener!", reply_markup=back_markup)
-        await message.stop_propagation()
-        return
-
-    if action == "set_verify_url":
-        if not message.text:
-            await message.reply_text("❌ Please send a valid verify shortener URL.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-        PENDING_INPUTS[state_key] = {
-            "action": "set_verify_api",
-            "back_cb": back_cb,
-            "data": {"target_uid": target_uid, "clone_bot_id": clone_bot_id, "url": message.text.strip()},
-        }
-        await message.reply_text("🔑 Now send your Verify Shortener API key (or /cancel to cancel):")
-        await message.stop_propagation()
-        return
-
-    if action == "set_verify_api":
-        if not message.text:
-            await message.reply_text("❌ Please send a valid API key.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-        PENDING_INPUTS.pop(state_key, None)
-        await cur_db.update_user_info(
-            target_uid,
-            {"verify_site": data["url"], "verify_api": message.text.strip(), "verify": True},
-        )
-        await message.reply_text("✅ Successfully configured verification!", reply_markup=back_markup)
-        await message.stop_propagation()
-        return
-
-    if action == "set_verify_time":
-        if not message.text:
-            await message.reply_text("❌ Please send a valid time like <code>10m</code> or <code>2h</code>.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-        arg = message.text.strip().lower()
-        try:
-            if arg.endswith("s"):
-                seconds = int(arg[:-1])
-            elif arg.endswith("m"):
-                seconds = int(arg[:-1]) * 60
-            elif arg.endswith("h"):
-                seconds = int(arg[:-1]) * 3600
-            elif arg.endswith("d"):
-                seconds = int(arg[:-1]) * 86400
-            else:
-                seconds = int(arg)
-        except Exception:
-            await message.reply_text("❌ Invalid format. Example: <code>10m</code> or <code>2h</code>", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-
-        PENDING_INPUTS.pop(state_key, None)
-        await cur_db.update_user_info(target_uid, {"verify_expire": seconds})
-        await message.reply_text(
-            f"✅ Verification time updated to <b>{seconds} seconds</b>.",
-            reply_markup=back_markup,
-        )
-        await message.stop_propagation()
-        return
-
-    if action == "set_tutorial":
-        if not message.text:
-            await message.reply_text("❌ Please send a valid tutorial URL.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-        PENDING_INPUTS.pop(state_key, None)
-        await cur_db.update_user_info(target_uid, {"how_to_download": message.text.strip()})
-        await message.reply_text("✅ Successfully saved tutorial link!", reply_markup=back_markup)
-        await message.stop_propagation()
-        return
-
-    if action == "set_force_channel":
-        if not message.text:
-            await message.reply_text("❌ Please send channel ID(s) separated by spaces.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
-        PENDING_INPUTS.pop(state_key, None)
-        target_client = await resolve_target_client(client, clone_bot_id)
-        channel_ids = message.text.split()
-        added_channels, failed_channels = [], []
-        settings = await cur_db.get_user(target_uid)
-        channels = list(settings.get("fsub_channels") or [])
-
-        for ch_id in channel_ids:
-            try:
-                ch_int = int(ch_id)
-                chat = await target_client.get_chat(ch_int)
+        if query.message.photo:
+            if start_pic or start_pic_bytes:
                 try:
-                    await target_client.create_chat_invite_link(chat.id)
+                    return await query.message.edit_caption(
+                        caption=caption_text,
+                        reply_markup=reply_markup,
+                        parse_mode=enums.ParseMode.HTML,
+                    )
                 except Exception:
-                    failed_channels.append(f"{chat.title} (<code>{ch_int}</code>) - ❌ Bot is not admin")
-                    continue
-                if ch_int not in channels:
-                    channels.append(ch_int)
-                    added_channels.append(f"{chat.title} (<code>{ch_int}</code>) ✅")
-            except Exception as e:
-                failed_channels.append(f"<code>{ch_id}</code> - ❌ {str(e)}")
+                    pass
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return await send_start_reply_safely(client, query.message, start_pic, start_pic_bytes, caption_text, reply_markup)
+        else:
+            if start_pic or start_pic_bytes:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                return await send_start_reply_safely(client, query.message, start_pic, start_pic_bytes, caption_text, reply_markup)
+            await query.message.edit_text(
+                text=caption_text,
+                reply_markup=reply_markup,
+                parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
 
-        await cur_db.update_user_info(target_uid, {"fsub_channels": channels})
-        text = "<b>📢 Force Subscribe Update Result:</b>\n\n"
-        if added_channels:
-            text += "✅ Added:\n" + "\n".join(added_channels) + "\n\n"
-        if failed_channels:
-            text += "⚠️ Failed:\n" + "\n".join(failed_channels)
-        await message.reply_text(text, reply_markup=back_markup)
-        await message.stop_propagation()
-        return
+    elif query.data == "help":
+        buttons = [[
+            InlineKeyboardButton('• Home •', callback_data='start'),
+            InlineKeyboardButton('• Close •', callback_data='close_data')
+        ]]
+        reply_markup = InlineKeyboardMarkup(buttons)
+        if getattr(client, "is_clone", False):
+            help_text = (
+                "<b>📖 How to Use This Bot</b>\n\n"
+                "• Send any document, video, or audio file to store it and get a shareable link.\n"
+                "• Use <b>Save in Batch</b> to combine multiple files into a single link.\n"
+                "• Bot owner can use <code>/settings</code> to customize start screen, caption, shortener, verification, and Force Subscribe.\n"
+            )
+            return await edit_caption_or_text(query, help_text, reply_markup)
+        await edit_caption_or_text(query, script.HELP_TXT, reply_markup)
 
-    if action == "set_log_channel":
-        PENDING_INPUTS.pop(state_key, None)
-        if not message.forward_from_chat or message.forward_from_chat.type != enums.ChatType.CHANNEL:
-            await message.reply_text("❌ That message was not forwarded from a channel.", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
+    elif query.data.startswith("stream"):
+        msg_id = int(query.data.split('#', 1)[1])
 
-        chat_id = message.forward_from_chat.id
-        target_client = await resolve_target_client(client, clone_bot_id)
         try:
-            chat = await target_client.get_chat(chat_id)
-            t = await target_client.send_message(chat.id, "Test!")
-            await t.delete()
-        except Exception as e:
-            await message.reply_text(f"❌ Something went wrong:\n\n<code>{e}</code>", reply_markup=back_markup)
-            await message.stop_propagation()
-            return
+            msg = await client.get_messages(DB_CHANNEL, msg_id)
+            if not msg:
+                return await query.answer("⚠️ File not found!", show_alert=True)
+        except Exception:
+            return await query.answer("⚠️ Invalid file!", show_alert=True)
 
-        await cur_db.update_user_info(target_uid, {"log_channel": chat.id})
-        await message.reply_text(
-            f"✅ Successfully added your log channel: <b>{chat.title}</b>",
-            reply_markup=back_markup,
+        real_file_id = await get_real_file_id(client, msg_id)
+        if not real_file_id:
+            return await query.answer("⚠️ Media not found!", show_alert=True)
+
+        try:
+            AKS = await safe_send_cached_media(client, BIN_CHANNEL, real_file_id)
+        except Exception:
+            return await query.answer("⚠️ Streaming is unavailable right now.", show_alert=True)
+
+        file_hash = get_hash(AKS)
+        online = f"{URL}/watch/{AKS.id}/AV_File_{int(time.time())}.mkv?hash={file_hash}"
+        download = f"{URL}/{AKS.id}?hash={file_hash}"
+
+        btn = [
+            [
+                InlineKeyboardButton("▶ Watch Online", url=online),
+                InlineKeyboardButton("⬇ Fast Download", url=download)
+            ],
+            [InlineKeyboardButton('❌ Close ❌', callback_data='close_data')]
+        ]
+
+        return await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
+
+    elif query.data == "addToBatchTrue":
+        if not query.message.reply_to_message:
+            return await query.answer("⚠️ Original file message not found. Please send the file again.", show_alert=True)
+        cur_db = await resolve_target_db(client)
+        file_msg_id = query.message.reply_to_message.id
+        await cur_db.add_media(user_id, file_msg_id)
+        await cur_db.add_user_file(user_id, file_msg_id)
+        confirm = await query.message.edit(
+            "✅ File saved in batch!\n\nPress the button below to generate your batch link:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📦 Get Batch Link", callback_data="getBatchLink")],
+                [InlineKeyboardButton("❌ Close", callback_data='close_data')]
+            ])
         )
-        await message.stop_propagation()
+        await cur_db.add_confirm_msg(user_id, confirm.id)
         return
+
+    elif query.data == "getBatchLink":
+        cur_db = await resolve_target_db(client)
+        message_ids = await cur_db.get_media(user_id)
+        if not message_ids:
+            return await query.answer("⚠️ Batch list is empty!", show_alert=True)
+        editable = await client.send_message(
+            chat_id=query.message.chat.id,
+            text="⏳ Please wait, generating batch link..."
+        )
+        await save_batch_media_in_channel(
+            bot=client,
+            editable=editable,
+            message_ids=message_ids,
+            owner_uid=user_id
+        )
+        await cur_db.clear_media(user_id)
+
+        async def delete_later():
+            await asyncio.sleep(30)
+            for msg_id in await cur_db.get_confirm_msgs(user_id):
+                try:
+                    await client.delete_messages(chat_id=query.message.chat.id, message_ids=msg_id)
+                except Exception:
+                    pass
+            await cur_db.clear_confirm_msgs(user_id)
+            for msg_id in await cur_db.get_user_files(user_id):
+                try:
+                    await client.delete_messages(chat_id=query.message.chat.id, message_ids=msg_id)
+                except Exception:
+                    pass
+            await cur_db.clear_user_files(user_id)
+
+        asyncio.create_task(delete_later())
+        return
+
+    elif query.data == "addToBatchFalse":
+        if not query.message.reply_to_message:
+            return await query.answer("⚠️ Original file message not found. Please send the file again.", show_alert=True)
+        await save_media_in_channel(
+            bot=client,
+            message=query.message.reply_to_message,
+            editable=query.message
+        )
+        try:
+            await query.message.reply_to_message.delete()
+        except Exception:
+            pass
+        return
+
+    elif query.data.startswith("user_reset"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        await cur_db.reset_user(target_uid)
+        await query.answer("✅ Your settings have been reset successfully.", show_alert=True)
+        buttons = [[InlineKeyboardButton("« Back", callback_data=f"user_details#{sfx}")]]
+        await send_or_edit_text(
+            query,
+            "⚙️ All of your settings have been reset to default!\n\nYou can now configure them freshly.",
+            InlineKeyboardMarkup(buttons),
+        )
+
+    elif query.data.startswith("user_details"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        user = await cur_db.get_user(target_uid)
+        shortener_api = user.get("shortener_api") or "Not Set"
+        base_site = user.get("base_site") or "Not Set"
+        custom_caption = user.get("custom_caption") or "Not Set"
+        verify_api = user.get("verify_api") or "Not Set"
+        verify_site = user.get("verify_site") or "Not Set"
+        verify_expire = user.get("verify_expire") or "Not Set"
+        how_to_download = user.get("how_to_download") or "Not Set"
+        verify = "✅ Enabled" if user.get("verify") else "❌ Disabled"
+        log_channel = user.get("log_channel") or "Not Set"
+        fsub_channels = user.get("fsub_channels") or []
+        protect_content = "✅ Enabled" if user.get("protect_content") else "❌ Disabled"
+        text = (
+            "<b>⚙️ Your File Store Settings</b>\n\n"
+            f"<b>✅ Verify Shortener:</b>\n"
+            f"• Site: <code>{verify_site}</code>\n"
+            f"• API: <code>{verify_api}</code>\n\n"
+            f"<b>🔗 File Shortener:</b>\n"
+            f"• Site: <code>{base_site}</code>\n"
+            f"• API: <code>{shortener_api}</code>\n\n"
+            f"<b>🧭 Verification Time:</b> <code>{verify_expire}</code>\n"
+            f"<b>📘 Verify Status:</b> {verify}\n"
+            f"<b>⚡ Tutorial Link:</b> {how_to_download}\n"
+            f"<b>🛡 Protect Content:</b> {protect_content}\n"
+            f"<b>📢 F-Sub Channels:</b> {', '.join([str(ch) for ch in fsub_channels]) if fsub_channels else 'Not Set'}\n"
+            f"<b>📜 Log Channel:</b> <code>{log_channel}</code>\n"
+            f"<b>📝 Caption:</b> <code>{custom_caption}</code>"
+        )
+        btn = [
+            [InlineKeyboardButton("♻️ Reset Settings", callback_data=f"user_reset#{sfx}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)]
+        ]
+        await send_or_edit_text(query, text, InlineKeyboardMarkup(btn))
+
+    elif query.data.startswith("permanent_link_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        user = await cur_db.get_user(target_uid)
+        is_on = user.get("permanent_link_mode", False)
+        text = (
+            "<b>🔗 Permanent Link Settings</b>\n\n"
+            "When enabled, file links use the Website URL (e.g. https://.../file_id...).\n"
+            "When disabled, direct Telegram t.me links are generated.\n\n"
+            f"<b>Current Status:</b> <code>{'ON ✅' if is_on else 'OFF ❌'}</code>"
+        )
+        buttons = [
+            [InlineKeyboardButton(f"Turn {'OFF ❌' if is_on else 'ON ✅'}", callback_data=f"toggle_permanent_link#{target_uid}#{is_on}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)]
+        ]
+        await send_or_edit_text(query, text, InlineKeyboardMarkup(buttons))
+
+    elif query.data.startswith("toggle_permanent_link"):
+        target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        new_status = False if status == 'True' else True
+        await cur_db.update_user_info(target_uid, {"permanent_link_mode": new_status})
+        user = await cur_db.get_user(target_uid)
+        is_on = user.get("permanent_link_mode", False)
+        text = (
+            "<b>🔗 Permanent Link Settings</b>\n\n"
+            "When enabled, file links use the Website URL (e.g. https://.../file_id...).\n"
+            "When disabled, direct Telegram t.me links are generated.\n\n"
+            f"<b>Current Status:</b> <code>{'ON ✅' if is_on else 'OFF ❌'}</code>"
+        )
+        buttons = [
+            [InlineKeyboardButton(f"Turn {'OFF ❌' if is_on else 'ON ✅'}", callback_data=f"toggle_permanent_link#{target_uid}#{is_on}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)]
+        ]
+        await send_or_edit_text(query, text, InlineKeyboardMarkup(buttons))
+        await query.answer(f"✅ Permanent Link mode is now {'ON' if is_on else 'OFF'}")
+
+    elif query.data.startswith("force_channel_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        target_client = await resolve_target_client(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        btn = [
+            [
+                InlineKeyboardButton('Set Channel', callback_data=f'set_force_channel#{sfx}'),
+                InlineKeyboardButton('Delete Channels', callback_data=f'force_channel_delete#{sfx}')
+            ],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        channels = settings.get("fsub_channels", [])
+        if not channels:
+            channel = "You haven't added any Force Subscribe channels yet."
+        else:
+            try:
+                chat_titles = []
+                for ch in channels:
+                    chat = await target_client.get_chat(ch)
+                    chat_titles.append(f"<b>{chat.title}</b> (<code>{ch}</code>)")
+                channel = "<b>Force Subscribe Channels:</b>\n" + "\n".join(chat_titles)
+            except Exception as e:
+                channel = f"⚠️ Error fetching channels: <code>{e}</code>"
+        await send_or_edit_text(
+            query,
+            f"Manage your Force Subscribe channels below.\n\n{channel}",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("force_channel_delete"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'force_channel_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        channels = settings.get("fsub_channels", [])
+        if not channels:
+            return await query.answer("You haven't added any Force Subscribe channels.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"fsub_channels": []})
+        await send_or_edit_text(query, "🗑 Successfully deleted all Force Subscribe channels.", InlineKeyboardMarkup(btn))
+
+    elif query.data.startswith("set_force_channel"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"force_channel_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_force_channel",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "Send one or more channel IDs separated by spaces:\n\n"
+            "<b>Example:</b> <code>-1001234567890 -1009876543210</code>\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("log_channel_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        target_client = await resolve_target_client(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        btn = [
+            [
+                InlineKeyboardButton('Set Channel', callback_data=f'set_log_channel#{sfx}'),
+                InlineKeyboardButton('Delete Channel', callback_data=f'log_channel_delete#{sfx}')
+            ],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        if not settings.get('log_channel'):
+            channel = "Not Set"
+        else:
+            try:
+                chat = await target_client.get_chat(settings['log_channel'])
+                channel = chat.title
+            except Exception:
+                channel = str(settings['log_channel'])
+        await send_or_edit_text(
+            query,
+            f"<b>📝 Log Channel Settings</b>\n\n<b>Current Log Channel:</b> {channel}",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("set_log_channel"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        target_client = await resolve_target_client(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"log_channel_setgs#{sfx}"
+        bot_username = getattr(target_client, "username", None) or (await target_client.get_me()).username
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_log_channel",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            f"<b>Forward any message from your log channel to me.</b>\n"
+            f"Make sure @{bot_username} is an admin in that channel.\n\n"
+            f"Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("log_channel_delete"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'log_channel_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        if not settings.get('log_channel'):
+            return await query.answer("You haven't added a log channel yet.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"log_channel": None})
+        await send_or_edit_text(query, "✅ Successfully deleted your log channel.", InlineKeyboardMarkup(btn))
+
+    elif query.data.startswith("update_protect_mode"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        protect = bool(settings.get('protect_content', False))
+        btn = [
+            [InlineKeyboardButton('Turn OFF ❌' if protect else 'Turn ON ✅', callback_data=f"clone_files_mode#{target_uid}#{protect}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        mode = 'ON ✅' if protect else 'OFF ❌'
+        await send_or_edit_text(
+            query,
+            f"<b>🛡 Content Protection Settings</b>\n\nControl whether users can forward or save your files.\n\n<b>Current Status:</b> {mode}",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("clone_files_mode"):
+        target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        await cur_db.update_user_info(target_uid, {"protect_content": False if status == 'True' else True})
+        settings = await cur_db.get_user(target_uid)
+        protect = bool(settings.get('protect_content', False))
+        btn = [
+            [InlineKeyboardButton('Turn OFF ❌' if protect else 'Turn ON ✅', callback_data=f"clone_files_mode#{target_uid}#{protect}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        mode = 'ON ✅' if protect else 'OFF ❌'
+        await send_or_edit_text(
+            query,
+            f"<b>🛡 Content Protection Settings</b>\n\nControl whether users can forward or save your files.\n\n<b>Current Status:</b> {mode}",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("tutorial_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        btn = [
+            [
+                InlineKeyboardButton('Set Tutorial', callback_data=f'set_tutorial#{sfx}'),
+                InlineKeyboardButton('Delete Tutorial', callback_data=f'tutorial_delete#{sfx}')
+            ],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        tutorial = f"Link: {settings['how_to_download']}" if settings.get('how_to_download') else "No tutorial link set yet."
+        await send_or_edit_text(
+            query,
+            f"<b>🎬 Tutorial Video Settings</b>\n\nManage your 'How to Open Link' tutorial URL.\n\n{tutorial}",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("set_tutorial"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"tutorial_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_tutorial",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "Send your tutorial video link.\n\nSend /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("tutorial_delete"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'tutorial_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        if not settings.get('how_to_download'):
+            return await query.answer("You haven't added a tutorial link yet.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"how_to_download": None})
+        await send_or_edit_text(query, "🗑 Successfully deleted tutorial link.", InlineKeyboardMarkup(btn))
+
+    elif query.data.startswith("verify_time_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        verify_time = settings.get("verify_expire", 0)
+        btn = [
+            [InlineKeyboardButton("⏳ Set Time", callback_data=f"set_verify_time#{sfx}")],
+            [InlineKeyboardButton("« Back", callback_data=f"verify_setgs#{sfx}")]
+        ]
+        await send_or_edit_text(
+            query,
+            f"<b>⏳ Verification Time Settings</b>\n\n"
+            f"⏰ Current Time: <code>{verify_time if verify_time else 'Not Set'}</code> sec",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("set_verify_time"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"verify_time_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_verify_time",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "<b>Send verification duration like:</b>\n"
+            "<code>10m</code> → 10 minutes\n"
+            "<code>1h</code> → 1 hour\n"
+            "<code>30s</code> → 30 seconds\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("verify_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        verify = bool(settings.get('verify', False))
+        btn = [
+            [InlineKeyboardButton('Disable Verify ❌' if verify else 'Enable Verify ✅', callback_data=f"update_verify#{target_uid}#{verify}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [
+                InlineKeyboardButton('Set Verify', callback_data=f'set_verify#{sfx}'),
+                InlineKeyboardButton('Delete Verify', callback_data=f'verify_delete#{sfx}')
+            ],
+            [InlineKeyboardButton("⏳ Set Verify Time", callback_data=f"verify_time_setgs#{sfx}")],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        verify_status = 'ON ✅' if verify else 'OFF ❌'
+        if not settings.get('verify_api'):
+            api_url = "No verification shortener configured."
+        else:
+            api_url = f"URL: <code>{settings['verify_site']}</code>\nAPI: <code>{settings['verify_api']}</code>"
+        await send_or_edit_text(
+            query,
+            f"<b>✅ Verification Settings</b>\n\nStatus: {verify_status}\n\n{api_url}",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("set_verify"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"verify_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_verify_url",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "<b>Send your Verify Shortener URL/Domain...</b>\n\nSend /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("update_verify"):
+        target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+
+        if status == 'False':
+            if not settings.get("verify_api") or not settings.get("verify_site"):
+                return await query.answer("⚠️ Please set Verify URL and API first!", show_alert=True)
+
+        await cur_db.update_user_info(target_uid, {"verify": False if status == 'True' else True})
+        settings = await cur_db.get_user(target_uid)
+        verify = bool(settings.get('verify', False))
+        btn = [
+            [InlineKeyboardButton('Disable Verify ❌' if verify else 'Enable Verify ✅', callback_data=f"update_verify#{target_uid}#{verify}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
+            [
+                InlineKeyboardButton('Set Verify', callback_data=f'set_verify#{sfx}'),
+                InlineKeyboardButton('Delete Verify', callback_data=f'verify_delete#{sfx}')
+            ],
+            [InlineKeyboardButton("⏳ Set Verify Time", callback_data=f"verify_time_setgs#{sfx}")],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        verify_status = 'ON ✅' if verify else 'OFF ❌'
+        await send_or_edit_text(
+            query,
+            f"<b>✅ Verification Settings</b>\n\nStatus: {verify_status}\n\nURL: <code>{settings.get('verify_site')}</code>\nAPI: <code>{settings.get('verify_api')}</code>",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("verify_delete"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'verify_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        if not settings.get('verify_api'):
+            return await query.answer("⚠️ No verification shortener is configured.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"verify": False, "verify_api": None, "verify_site": None})
+        await send_or_edit_text(query, "🗑 Successfully deleted verification settings.", InlineKeyboardMarkup(btn))
+
+    elif query.data.startswith("shortlink_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        settings = await cur_db.get_user(target_uid)
+        btn = [
+            [
+                InlineKeyboardButton('Set Shortlink', callback_data=f'set_shortlink#{sfx}'),
+                InlineKeyboardButton('Delete Shortlink', callback_data=f'shortlink_delete#{sfx}')
+            ],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        if not settings.get('shortener_api'):
+            api_url = "No shortlink configured."
+        else:
+            api_url = f"URL: <code>{settings['base_site']}</code>\nAPI: <code>{settings['shortener_api']}</code>"
+        await send_or_edit_text(
+            query,
+            f"<b>🔗 Shortener Settings</b>\n\n{api_url}",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("set_shortlink"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"shortlink_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_shortlink_url",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "<b>Send your Shortener URL/Domain...</b>\n\nSend /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("shortlink_delete"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'shortlink_setgs#{sfx}')]]
+        settings = await cur_db.get_user(target_uid)
+        if not settings.get('shortener_api'):
+            return await query.answer("⚠️ No shortlink is configured.", show_alert=True)
+        await cur_db.update_user_info(target_uid, {"base_site": None, "shortener_api": None})
+        await send_or_edit_text(query, "🗑 Successfully deleted shortlink!", InlineKeyboardMarkup(btn))
+
+    elif query.data.startswith("caption_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        user = await cur_db.get_user(target_uid)
+        caption = user.get("custom_caption") or "Not Set"
+        btn = [
+            [InlineKeyboardButton("📝 Set Caption", callback_data=f"set_caption#{sfx}")],
+            [InlineKeyboardButton("♻️ Default Caption", callback_data=f"default_caption#{sfx}")],
+            [InlineKeyboardButton("« Back", callback_data=back_cb)]
+        ]
+        await send_or_edit_text(
+            query,
+            f"<b>📝 File Caption Settings</b>\n\n<b>Current Caption:</b>\n<code>{caption}</code>",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("default_caption"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        btn = [[InlineKeyboardButton("« Back", callback_data=f"caption_setgs#{sfx}")]]
+        await cur_db.update_user_info(target_uid, {"custom_caption": None})
+        await send_or_edit_text(query, "✅ Reset to default file caption.", InlineKeyboardMarkup(btn))
+
+    elif query.data.startswith("set_caption"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"caption_setgs#{sfx}"
+        await set_pending_input(
+            client,
+            user_id,
+            action="set_caption",
+            back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "✍️ Send your custom file caption.\n\n"
+            "Available placeholders:\n"
+            "• <code>{file_name}</code> — File name\n"
+            "• <code>{file_size}</code> — File size\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("settings"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+
+        title = "<b>⚙️ Settings Menu</b>"
+        if clone_bot_id:
+            clone_doc = await clone_db.get_clone(clone_bot_id)
+            if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+                return await query.answer("⚠️ Access denied!", show_alert=True)
+            title = f"<b>⚙️ Clone Bot Settings (@{clone_doc.get('bot_username')})</b>"
+
+        buttons = [
+            [InlineKeyboardButton("📝 Caption Settings", callback_data=f"caption_setgs#{sfx}")],
+            [InlineKeyboardButton("🔗 Set Shortener", callback_data=f"shortlink_setgs#{sfx}")],
+            [InlineKeyboardButton("✅ Verify Settings", callback_data=f"verify_setgs#{sfx}")],
+            [InlineKeyboardButton("🔗 Permanent Link", callback_data=f"permanent_link_setgs#{sfx}")],
+            [InlineKeyboardButton("🎬 Tutorial Settings", callback_data=f"tutorial_setgs#{sfx}")],
+            [InlineKeyboardButton("🛡 Protect Settings", callback_data=f"update_protect_mode#{sfx}")],
+            [InlineKeyboardButton("📢 Force Subscribe", callback_data=f"force_channel_setgs#{sfx}")],
+            [InlineKeyboardButton("📢 Log Channel", callback_data=f"log_channel_setgs#{sfx}")],
+            [InlineKeyboardButton("📑 My Details", callback_data=f"user_details#{sfx}")],
+        ]
+        if clone_bot_id:
+            buttons.append([InlineKeyboardButton("« Back to Clone Panel", callback_data=f"manage_clone#{clone_bot_id}")])
+
+        await send_or_edit_text(
+            query,
+            f"{title}\n\nSelect an option below to customize your file settings:",
+            InlineKeyboardMarkup(buttons),
+        )
