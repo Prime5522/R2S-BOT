@@ -8,7 +8,11 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from config import MAIN_BOT_USERNAME, MAX_CLONE_PER_USER, PICS
+from pyrogram.errors import UserNotParticipant
+from config import (
+    MAIN_BOT_USERNAME, MAX_CLONE_PER_USER, PICS,
+    CLONE_CREATION_FSUB_CHANNEL, CLONE_CREATION_FSUB_INVITE,
+)
 from Script import script
 from database import get_db, get_clone_database
 from database.clonedb import clone_db
@@ -140,10 +144,9 @@ async def build_start_content(client: Client, user_mention: str):
     if getattr(client, "is_clone", False):
         start_pic = getattr(client, "custom_start_pic", None)
         start_pic_bytes = getattr(client, "custom_start_pic_bytes", None)
-        # ✨ ওনার নিজের কোনো পিকচার সেট না করলে মূল বটের ডিফল্ট পিকচারটাই দেখাবে,
-        # একদম খালি (শুধু টেক্সট) /start না দেখিয়ে।
-        if not start_pic and not start_pic_bytes:
-            start_pic = PICS if PICS else None
+        # ✨ ওনার নিজে পিকচার সেট না করলে কোনো পিকচার দেখাবে না (মূল বটের পিকচার
+        # আর ইনহেরিট হবে না) — শুধু টেক্সট আকারে /start দেখাবে, যতক্ষণ না ওনার
+        # নিজে "Start Picture" থেকে একটা সেট করে।
         custom_txt = getattr(client, "custom_start_txt", None)
         template = custom_txt if custom_txt else DEFAULT_CLONE_START_TXT
         caption_text = format_start_text(template, user_mention, bot_mention)
@@ -264,6 +267,58 @@ def parse_custom_buttons(raw_text: str):
     if not rows:
         raise ValueError("No valid buttons found.")
     return rows
+
+
+# ================= ✨ CLONE-CREATION FORCE SUBSCRIBE (main bot only) ✨ =================
+# এটা ক্লোন ওনারের নিজের fsub সেটিং থেকে আলাদা — এটা শুধু মূল বটে নতুন ক্লোন
+# তৈরি করার সময়(টোকেন জমা দেওয়ার সময়) চেক হয়, /start কে ব্লক করে না।
+
+async def _is_fsub_member(client: Client, channel_id: int, user_id: int) -> bool:
+    try:
+        member = await client.get_chat_member(channel_id, user_id)
+        return member.status not in (enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED)
+    except UserNotParticipant:
+        return False
+    except Exception:
+        # চ্যানেল আইডি ভুল/বট অ্যাডমিন না থাকলে চেকটা স্কিপ করে দেয় (ইউজারকে আটকায় না)
+        return True
+
+
+async def _get_fsub_invite_link(client: Client, channel_id: int) -> str:
+    if CLONE_CREATION_FSUB_INVITE:
+        return CLONE_CREATION_FSUB_INVITE
+    try:
+        chat = await client.get_chat(channel_id)
+        if chat.username:
+            return f"https://t.me/{chat.username}"
+    except Exception:
+        pass
+    try:
+        return await client.export_chat_invite_link(channel_id)
+    except Exception:
+        return "https://t.me/"
+
+
+async def _finalize_clone_creation(client: Client, reply_target, user_id: int, token: str, owner_mention: str):
+    wait_msg = await reply_target.reply_text("<i>⏳ Verifying token and starting your clone bot, please wait...</i>")
+    try:
+        me = await start_clone(token, user_id, owner_mention=owner_mention)
+    except Exception as e:
+        await wait_msg.edit_text(
+            f"❌ <b>Failed to create clone:</b>\n<code>{e}</code>\n\n"
+            "Please check your BotFather token and try again with /clone.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="start")]]),
+        )
+        return
+    await wait_msg.edit_text(
+        f"✨ <b>Successfully Cloned Your Bot!</b>\n\n"
+        f"🤖 <b>Bot:</b> @{me.username}\n\n"
+        f"You can now start @{me.username} or customize it using the button below:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"⚙️ Customize @{me.username}", callback_data=f"manage_clone#{me.id}")],
+            [InlineKeyboardButton("« Back to Home", callback_data="start")],
+        ]),
+    )
 
 
 async def send_clone_entry(client: Client, target, is_callback: bool = False):
@@ -626,6 +681,28 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             )
         return True
 
+    if data == "clone_fsub_recheck":
+        bot_id = await get_client_bot_id(client)
+        state_key = (bot_id, user_id)
+        state = PENDING_INPUTS.get(state_key)
+        pending_token = (state or {}).get("data", {}).get("pending_token")
+
+        if not pending_token:
+            await query.answer("⚠️ No pending clone creation found. Please start again with /clone.", show_alert=True)
+            return True
+
+        if CLONE_CREATION_FSUB_CHANNEL:
+            is_member = await _is_fsub_member(client, CLONE_CREATION_FSUB_CHANNEL, user_id)
+            if not is_member:
+                await query.answer("❌ You haven't joined the channel yet!", show_alert=True)
+                return True
+
+        owner_mention = state["data"].get("pending_owner_mention") or query.from_user.mention
+        PENDING_INPUTS.pop(state_key, None)
+        await query.answer("✅ Verified! Creating your clone...")
+        await _finalize_clone_creation(client, query.message, user_id, pending_token, owner_mention)
+        return True
+
     if data.startswith("manage_clone#"):
         bot_id = int(data.split("#")[1])
         await clear_pending_input(client, user_id)
@@ -765,8 +842,8 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             "<b>🔘 Send Your Custom Start Buttons</b>\n\n"
             "These buttons will appear <b>below</b> your clone bot's default buttons.\n\n"
             "<b>Format</b> (one row per line, use <code>|</code> for multiple buttons in one row):\n"
-            "<code>My Channel - https://t.me/YourChannel</code>\n"
-            "<code>Website - https://example.com | Support - https://t.me/YourSupport</code>\n\n"
+            "<code>Updates Channel - https://t.me/PrimeXBots</code>\n"
+            "<code>Support Group - https://t.me/Prime_Support_group</code>\n\n"
             "Send /cancel to cancel."
         )
         await send_or_edit_text(
@@ -941,8 +1018,8 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             "These buttons will appear <b>under every file</b> your bot delivers to users "
             "(this is separate from the Start Buttons shown on /start).\n\n"
             "<b>Format</b> (one row per line, use <code>|</code> for multiple buttons in one row):\n"
-            "<code>Join Channel - https://t.me/YourChannel</code>\n"
-            "<code>Website - https://example.com | Support - https://t.me/YourSupport</code>\n\n"
+            "<code>Updates Channel - https://t.me/PrimeXBots</code>\n"
+            "<code>Support Group - https://t.me/Prime_Support_group</code>\n\n"
             "Send /cancel to cancel."
         )
         await send_or_edit_text(query, text, InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_filebtns_view#{bot_id}")]]))
@@ -1184,29 +1261,28 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
             return
 
         token = match.group(1).strip()
+
+        # ✨ ক্লোন তৈরির আগে — টোকেন জমা দেওয়ার সময় — মূল বটের চ্যানেলে জয়েন বাধ্যতামূলক
+        if CLONE_CREATION_FSUB_CHANNEL:
+            is_member = await _is_fsub_member(client, CLONE_CREATION_FSUB_CHANNEL, user_id)
+            if not is_member:
+                state["data"]["pending_token"] = token
+                state["data"]["pending_owner_mention"] = message.from_user.mention
+                invite_link = await _get_fsub_invite_link(client, CLONE_CREATION_FSUB_CHANNEL)
+                btn = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(sc("📢 Join Channel"), url=invite_link)],
+                    [InlineKeyboardButton(sc("✅ I've Joined"), callback_data="clone_fsub_recheck")],
+                ])
+                await message.reply_text(
+                    f"<b>⚠️ {sc('One Last Step!')}</b>\n\n"
+                    f"{sc('Please join our channel to create your clone bot. After joining, tap the button below.')}",
+                    reply_markup=btn,
+                )
+                await message.stop_propagation()
+                return
+
         PENDING_INPUTS.pop(state_key, None)
-
-        wait_msg = await message.reply_text("<i>⏳ Verifying token and starting your clone bot, please wait...</i>")
-        try:
-            me = await start_clone(token, user_id, owner_mention=message.from_user.mention)
-        except Exception as e:
-            await wait_msg.edit_text(
-                f"❌ <b>Failed to create clone:</b>\n<code>{e}</code>\n\n"
-                "Please check your BotFather token and try again with /clone.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="start")]]),
-            )
-            await message.stop_propagation()
-            return
-
-        await wait_msg.edit_text(
-            f"✨ <b>Successfully Cloned Your Bot!</b>\n\n"
-            f"🤖 <b>Bot:</b> @{me.username}\n\n"
-            f"You can now start @{me.username} or customize it using the button below:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚙️ Customize @{me.username}", callback_data=f"manage_clone#{me.id}")],
-                [InlineKeyboardButton("« Back to Home", callback_data="start")],
-            ]),
-        )
+        await _finalize_clone_creation(client, message, user_id, token, message.from_user.mention)
         await message.stop_propagation()
         return
 
@@ -1277,8 +1353,8 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
             await message.reply_text(
                 f"❌ {e}\n\n"
                 "Example format:\n"
-                "<code>My Channel - https://t.me/YourChannel</code>\n"
-                "<code>Site - https://example.com | Support - https://t.me/Support</code>",
+                "<code>Updates Channel - https://t.me/PrimeXBots</code>\n"
+                "<code>Support Group - https://t.me/Prime_Support_group</code>",
                 reply_markup=back_markup,
             )
             await message.stop_propagation()
@@ -1352,8 +1428,8 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
             await message.reply_text(
                 f"❌ {e}\n\n"
                 "Example format:\n"
-                "<code>Join Channel - https://t.me/YourChannel</code>\n"
-                "<code>Site - https://example.com | Support - https://t.me/Support</code>",
+                "<code>Updates Channel - https://t.me/PrimeXBots</code>\n"
+                "<code>Support Group - https://t.me/Prime_Support_group</code>",
                 reply_markup=back_markup,
             )
             await message.stop_propagation()
