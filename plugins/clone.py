@@ -13,9 +13,13 @@ from Script import script
 from database import get_db, get_clone_database
 from database.clonedb import clone_db
 from clone_manager import start_clone, stop_clone, restart_clone, delete_clone, RUNNING_CLONES
+from utils import sc
 
 # Per-(bot_id, user_id) input state store — completely isolated across users
 PENDING_INPUTS: dict = {}
+
+# ✨ মূল বট ও সব ক্লোনের স্টার্ট মেসেজে একই লেবেলের বাটন — ফন্ট প্রিমিয়াম স্টাইলে
+CLONE_BTN_LABEL = sc("Create Your Own Clone")
 
 DEFAULT_CLONE_START_TXT = (
     "<b>Hello {mention} 👋,\n\n"
@@ -136,18 +140,22 @@ async def build_start_content(client: Client, user_mention: str):
     if getattr(client, "is_clone", False):
         start_pic = getattr(client, "custom_start_pic", None)
         start_pic_bytes = getattr(client, "custom_start_pic_bytes", None)
+        # ✨ ওনার নিজের কোনো পিকচার সেট না করলে মূল বটের ডিফল্ট পিকচারটাই দেখাবে,
+        # একদম খালি (শুধু টেক্সট) /start না দেখিয়ে।
+        if not start_pic and not start_pic_bytes:
+            start_pic = PICS if PICS else None
         custom_txt = getattr(client, "custom_start_txt", None)
         template = custom_txt if custom_txt else DEFAULT_CLONE_START_TXT
         caption_text = format_start_text(template, user_mention, bot_mention)
 
         buttons = [
             [
-                InlineKeyboardButton("• Help •", callback_data="help"),
-                InlineKeyboardButton("• About •", callback_data="about"),
+                InlineKeyboardButton(sc("• Help •"), callback_data="help"),
+                InlineKeyboardButton(sc("• About •"), callback_data="about"),
             ],
             [
                 InlineKeyboardButton(
-                    "✨ Create Your Own Clone",
+                    f"✨ {CLONE_BTN_LABEL}",
                     url=f"https://t.me/{MAIN_BOT_USERNAME}?start=clone",
                 )
             ],
@@ -169,15 +177,15 @@ async def build_start_content(client: Client, user_mention: str):
     caption_text = format_start_text(script.START_TXT, user_mention, bot_mention)
     buttons = [
         [
-            InlineKeyboardButton("• Updates •", url="https://t.me/PrimeXBots"),
-            InlineKeyboardButton("• Support •", url="https://t.me/Prime_Support_group"),
+            InlineKeyboardButton(sc("• Updates •"), url="https://t.me/PrimeXBots"),
+            InlineKeyboardButton(sc("• Support •"), url="https://t.me/Prime_Support_group"),
         ],
         [
-            InlineKeyboardButton("• Help •", callback_data="help"),
-            InlineKeyboardButton("• About •", callback_data="about"),
+            InlineKeyboardButton(sc("• Help •"), callback_data="help"),
+            InlineKeyboardButton(sc("• About •"), callback_data="about"),
         ],
         [
-            InlineKeyboardButton("✨ Create Your Own Clone", callback_data="create_clone"),
+            InlineKeyboardButton(f"✨ {CLONE_BTN_LABEL}", callback_data="create_clone"),
         ],
     ]
     return start_pic, None, caption_text, InlineKeyboardMarkup(buttons)
@@ -191,6 +199,26 @@ async def send_start_reply_safely(
     caption_text: str,
     reply_markup: InlineKeyboardMarkup,
 ):
+    """
+    ✨ পিকচার পাঠানো এখন bytes (raw) কে সবসময় প্রথমে ট্রাই করে — এতে কোনো
+    পুরনো/ইনভ্যালিড file_id-র উপর নির্ভর করতে হয় না, তাই "পিকচার দেখাচ্ছে না"
+    সমস্যাটা আর হবে না। file_id (start_pic) শুধু bytes না থাকলে fallback
+    হিসেবে ব্যবহার হয় (পুরনো ডাটা/মূল বটের PICS এর জন্য)।
+    """
+    if start_pic_bytes:
+        try:
+            raw = bytes(start_pic_bytes)
+            bio = io.BytesIO(raw)
+            bio.name = "start.jpg"
+            return await reply_target.reply_photo(
+                photo=bio,
+                caption=caption_text,
+                reply_markup=reply_markup,
+                parse_mode=enums.ParseMode.HTML,
+            )
+        except Exception:
+            pass  # bytes দিয়ে না হলে নিচে file_id দিয়ে ট্রাই করবে
+
     if start_pic:
         try:
             return await reply_target.reply_photo(
@@ -200,26 +228,7 @@ async def send_start_reply_safely(
                 parse_mode=enums.ParseMode.HTML,
             )
         except Exception:
-            if getattr(client, "is_clone", False):
-                client.custom_start_pic = None
-
-    if start_pic_bytes:
-        try:
-            bio = io.BytesIO(start_pic_bytes)
-            bio.name = "start.jpg"
-            sent = await reply_target.reply_photo(
-                photo=bio,
-                caption=caption_text,
-                reply_markup=reply_markup,
-                parse_mode=enums.ParseMode.HTML,
-            )
-            if sent.photo and getattr(client, "is_clone", False):
-                new_fid = sent.photo.file_id
-                client.custom_start_pic = new_fid
-                await clone_db.update_clone_settings(client.bot_id, {"start_pic": new_fid})
-            return sent
-        except Exception:
-            pass
+            pass  # file_id টাও কাজ না করলে নিচে টেক্সট হিসেবে পাঠাবে
 
     return await reply_target.reply_text(
         text=caption_text,
@@ -262,12 +271,12 @@ async def send_clone_entry(client: Client, target, is_callback: bool = False):
 
     if getattr(client, "is_clone", False):
         text = (
-            "<b>✨ Create or Manage Your Clone Bot</b>\n\n"
+            f"<b>✨ {CLONE_BTN_LABEL}</b>\n\n"
             "Clone creation and customization are managed on our main bot.\n"
             "Click the button below to continue:"
         )
         markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🚀 Open Clone Panel", url=f"https://t.me/{MAIN_BOT_USERNAME}?start=clone")]]
+            [[InlineKeyboardButton(sc("🚀 Open Clone Panel"), url=f"https://t.me/{MAIN_BOT_USERNAME}?start=clone")]]
         )
         if is_callback:
             return await send_or_edit_text(target, text, markup)
@@ -277,37 +286,8 @@ async def send_clone_entry(client: Client, target, is_callback: bool = False):
     existing = await clone_db.get_user_clone(user_id)
 
     if existing:
-        bot_id = existing["bot_id"]
-        bot_username = existing.get("bot_username") or "Unknown"
-        status = existing.get("status", "active")
-        status_label = "✅ Active" if status == "active" else "⛔ Inactive"
-        has_msg = "Custom" if existing.get("start_msg") else "Default"
-        has_pic = "Set" if (existing.get("start_pic") or existing.get("start_pic_bytes")) else "None"
-        btn_count = sum(len(r) for r in (existing.get("start_buttons") or []))
-
-        text = (
-            "<b>🤖 Your Cloned Bot</b>\n\n"
-            "You already have a cloned bot connected to your account.\n"
-            f"<i>(Limit: {MAX_CLONE_PER_USER} clone per user)</i>\n\n"
-            f"• <b>Bot:</b> @{bot_username}\n"
-            f"• <b>Status:</b> {status_label}\n"
-            f"• <b>Start Message:</b> {has_msg}\n"
-            f"• <b>Start Picture:</b> {has_pic}\n"
-            f"• <b>Custom Buttons:</b> {btn_count}\n\n"
-            "👇 Tap your bot's button below to customize and manage all settings:"
-        )
-        buttons = [
-            [InlineKeyboardButton(f"🤖 @{bot_username}", callback_data=f"manage_clone#{bot_id}")],
-        ]
-        if is_callback:
-            buttons.append([InlineKeyboardButton("« Back", callback_data="start")])
-        else:
-            buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_data")])
-
-        markup = InlineKeyboardMarkup(buttons)
-        if is_callback:
-            return await send_or_edit_text(target, text, markup)
-        return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+        # ✨ আগে থেকেই ক্লোন থাকলে এক্সট্রা ক্লিক ছাড়াই সরাসরি কাস্টমাইজ প্যানেলে নিয়ে যাওয়া হয়
+        return await show_manage_clone_panel(target, existing, is_callback=is_callback)
 
     back_cb = "start" if is_callback else "close_data"
     await set_pending_input(client, user_id, action="awaiting_botfather_forward", back_cb=back_cb)
@@ -344,47 +324,49 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
     protect_on = bool(owner_settings.get("protect_content", False))
 
     text = (
-        f"<b>✨ ᴄʟᴏɴᴇ ᴄᴏɴᴛʀᴏʟ ᴘᴀɴᴇʟ — @{bot_username}</b>\n\n"
+        f"<b>✨ {sc('Clone Control Panel')} — @{bot_username}</b>\n\n"
         f"📌 <b>Status:</b> {status_label}\n\n"
-        "ʏᴏᴜʀ ᴄʟᴏɴᴇ ɪs ᴀ ꜰᴜʟʟʏ ɪɴᴅᴇᴘᴇɴᴅᴇɴᴛ ʙᴏᴛ ᴡɪᴛʜ ɪᴛs ᴏᴡɴ ᴅᴀᴛᴀʙᴀsᴇ.\n"
-        "ᴜsᴇ ᴛʜᴇ ᴄᴀᴛᴇɢᴏʀɪᴇs ʙᴇʟᴏᴡ ᴛᴏ ᴍᴀᴋᴇ ɪᴛ ʏᴏᴜʀ ᴏᴡɴ 👇"
+        f"{sc('Your clone is a fully independent bot with its own database.')}\n"
+        f"{sc('Tap a category below to customize it:')}\n\n"
+        f"🎨 <b>{sc('Start Screen')}</b> — {sc('what users see on /start (picture, welcome text, extra buttons)')}"
     )
 
     sfx = f"{owner_id}#{bot_id}"
     buttons = [
-        [InlineKeyboardButton("🎨 Start Appearance", callback_data=f"clone_appearance#{bot_id}")],
+        [InlineKeyboardButton(sc("🎨 Start Screen (Picture / Message / Buttons)"), callback_data=f"clone_appearance#{bot_id}")],
         [
-            InlineKeyboardButton("📄 About", callback_data=f"clone_about_view#{bot_id}"),
-            InlineKeyboardButton("❓ Help", callback_data=f"clone_help_view#{bot_id}"),
+            InlineKeyboardButton(sc("📄 About Page"), callback_data=f"clone_about_view#{bot_id}"),
+            InlineKeyboardButton(sc("❓ Help Page"), callback_data=f"clone_help_view#{bot_id}"),
         ],
-        [InlineKeyboardButton("📎 File Delivery Buttons", callback_data=f"clone_filebtns_view#{bot_id}")],
+        [InlineKeyboardButton(sc("📎 File Delivery Buttons"), callback_data=f"clone_filebtns_view#{bot_id}")],
         [
-            InlineKeyboardButton("📝 File Caption", callback_data=f"caption_setgs#{sfx}"),
+            InlineKeyboardButton(sc("📝 File Caption"), callback_data=f"caption_setgs#{sfx}"),
             InlineKeyboardButton(
-                f"🛡 Protect: {'ON ✅' if protect_on else 'OFF ❌'}",
+                sc(f"🛡 Protect: {'ON ✅' if protect_on else 'OFF ❌'}"),
                 callback_data=f"clone_quick_protect#{bot_id}",
             ),
         ],
         [
-            InlineKeyboardButton("🔗 Shortener", callback_data=f"shortlink_setgs#{sfx}"),
-            InlineKeyboardButton("✅ Verify Settings", callback_data=f"verify_setgs#{sfx}"),
+            InlineKeyboardButton(sc("🔗 Shortener Link"), callback_data=f"shortlink_setgs#{sfx}"),
+            InlineKeyboardButton(sc("✅ Verify Settings"), callback_data=f"verify_setgs#{sfx}"),
         ],
         [
-            InlineKeyboardButton("📢 Force Sub", callback_data=f"force_channel_setgs#{sfx}"),
-            InlineKeyboardButton("📜 Log Channel", callback_data=f"log_channel_setgs#{sfx}"),
+            InlineKeyboardButton(sc("📢 Force Subscribe"), callback_data=f"force_channel_setgs#{sfx}"),
+            InlineKeyboardButton(sc("📜 Log Channel"), callback_data=f"log_channel_setgs#{sfx}"),
         ],
         [
-            InlineKeyboardButton("🎬 Tutorial", callback_data=f"tutorial_setgs#{sfx}"),
-            InlineKeyboardButton("🔗 Perm. Link", callback_data=f"permanent_link_setgs#{sfx}"),
+            InlineKeyboardButton(sc("🎬 Tutorial Link"), callback_data=f"tutorial_setgs#{sfx}"),
+            InlineKeyboardButton(sc("🔗 Permanent Link"), callback_data=f"permanent_link_setgs#{sfx}"),
         ],
-        [InlineKeyboardButton("📑 Full Details", callback_data=f"clone_details#{bot_id}")],
+        [InlineKeyboardButton(sc("📑 Full Details"), callback_data=f"clone_details#{bot_id}")],
+        [InlineKeyboardButton(sc("🔄 Reset All Clone Settings"), callback_data=f"clone_reset#{bot_id}")],
         [
-            InlineKeyboardButton("🔁 Restart", callback_data=f"clone_restart#{bot_id}"),
-            InlineKeyboardButton(toggle_label, callback_data=f"clone_toggle#{bot_id}"),
+            InlineKeyboardButton(sc("🔁 Restart"), callback_data=f"clone_restart#{bot_id}"),
+            InlineKeyboardButton(sc(toggle_label), callback_data=f"clone_toggle#{bot_id}"),
         ],
         [
-            InlineKeyboardButton("🗑 Delete Clone", callback_data=f"clone_delete#{bot_id}"),
-            InlineKeyboardButton("« Back", callback_data="clone_card"),
+            InlineKeyboardButton(sc("🗑 Delete Clone"), callback_data=f"clone_delete#{bot_id}"),
+            InlineKeyboardButton(sc("« Back"), callback_data="clone_card"),
         ],
     ]
 
@@ -404,18 +386,19 @@ async def show_appearance_menu(target, clone_doc: dict):
     btn_count = sum(len(r) for r in saved_btns)
 
     text = (
-        "<b>🎨 Start Appearance</b>\n\n"
-        "ᴛʜɪs ɪs ᴡʜᴀᴛ ᴜsᴇʀs sᴇᴇ ᴡʜᴇɴ ᴛʜᴇʏ ᴘʀᴇss <code>/start</code> ᴏɴ ʏᴏᴜʀ ᴄʟᴏɴᴇ.\n\n"
-        f"🖼 <b>Start Picture:</b> {'Set ✅' if has_pic else 'Default'}\n"
-        f"📝 <b>Start Message:</b> {'Custom ✅' if has_msg else 'Default'}\n"
-        f"🔘 <b>Extra Buttons:</b> {btn_count} set\n\n"
-        "👇 ᴛᴀᴘ ᴀ sᴇᴄᴛɪᴏɴ ᴛᴏ ᴠɪᴇᴡ, ᴄʜᴀɴɢᴇ ᴏʀ ᴅᴇʟᴇᴛᴇ ɪᴛ:"
+        f"<b>🎨 {sc('Start Screen')}</b>\n\n"
+        f"{sc('This is exactly what a user sees the moment they press')} <code>/start</code> "
+        f"{sc('on your clone bot — the picture, the welcome text, and any extra buttons below it.')}\n\n"
+        f"🖼 <b>{sc('Picture')}:</b> {sc('Set ✅') if has_pic else sc('Default')}\n"
+        f"📝 <b>{sc('Welcome Message')}:</b> {sc('Custom ✅') if has_msg else sc('Default')}\n"
+        f"🔘 <b>{sc('Extra Buttons')}:</b> {btn_count} {sc('set')}\n\n"
+        f"👇 {sc('Tap a section below to view, change or delete it:')}"
     )
     buttons = [
-        [InlineKeyboardButton("🖼 Start Picture", callback_data=f"clone_viewpic#{bot_id}")],
-        [InlineKeyboardButton("📝 Start Message", callback_data=f"clone_viewmsg#{bot_id}")],
-        [InlineKeyboardButton("🔘 Start Buttons", callback_data=f"clone_viewbtns#{bot_id}")],
-        [InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")],
+        [InlineKeyboardButton(sc("🖼 Start Picture"), callback_data=f"clone_viewpic#{bot_id}")],
+        [InlineKeyboardButton(sc("📝 Welcome Message"), callback_data=f"clone_viewmsg#{bot_id}")],
+        [InlineKeyboardButton(sc("🔘 Extra Buttons"), callback_data=f"clone_viewbtns#{bot_id}")],
+        [InlineKeyboardButton(sc("« Back"), callback_data=f"manage_clone#{bot_id}")],
     ]
     return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
 
@@ -981,6 +964,58 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
         await query.answer("✅ All file delivery buttons removed!", show_alert=True)
         clone_doc = await clone_db.get_clone(bot_id)
         await show_filebtns_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_reset_confirm#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+
+        reset_values = {
+            "start_pic": None,
+            "start_pic_bytes": None,
+            "start_msg": None,
+            "start_buttons": [],
+            "about_text": None,
+            "help_text": None,
+            "file_buttons": [],
+        }
+        await clone_db.update_clone_settings(bot_id, reset_values)
+        running = RUNNING_CLONES.get(bot_id)
+        if running:
+            running.custom_start_pic = None
+            running.custom_start_pic_bytes = None
+            running.custom_start_txt = None
+            running.custom_start_buttons = []
+            running.custom_about_txt = None
+            running.custom_help_txt = None
+            running.custom_file_buttons = []
+
+        await query.answer("✅ All customization has been reset to default!", show_alert=True)
+        clone_doc = await clone_db.get_clone(bot_id)
+        await show_manage_clone_panel(query, clone_doc, is_callback=True)
+        return True
+
+    if data.startswith("clone_reset#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+
+        btn = InlineKeyboardMarkup([[
+            InlineKeyboardButton(sc("✅ Yes, Reset Everything"), callback_data=f"clone_reset_confirm#{bot_id}"),
+            InlineKeyboardButton(sc("❌ No"), callback_data=f"manage_clone#{bot_id}"),
+        ]])
+        await send_or_edit_text(
+            query,
+            f"<b>⚠️ {sc('Reset All Clone Settings?')}</b>\n\n"
+            f"{sc('This will reset your Start Picture, Start Message, Start Buttons, About text, Help text, and File Delivery Buttons back to default.')}\n\n"
+            f"{sc('Note: your bot token, stored files, and users are NOT affected — only appearance/customization settings reset.')}",
+            btn,
+        )
         return True
 
     if data.startswith("clone_details#"):
