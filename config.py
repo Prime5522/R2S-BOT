@@ -16,7 +16,7 @@ BIN_CHANNEL = int(environ.get("BIN_CHANNEL", ""))
 IS_FSUB = environ.get("IS_FSUB", True)  # Set "True" For Enable Force Subscribe
 AUTH_CHANNELS = list(map(int, environ.get("AUTH_CHANNEL", "").split()))
 # 💾 MongoDB Connection Information
-DB_URL = environ.get('DATABASE_URI', "mongodb+srv://aman991932:aman@cluster0.4psab89.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0") # MongoDB connection URI
+DB_URL = environ.get('DATABASE_URI', "") # MongoDB connection URI
 DB_NAME = environ.get('DATABASE_NAME', "Cluster0")  # MongoDB database name
 FORWARD_AS_COPY = bool(os.environ.get("FORWARD_AS_COPY", True))
 PICS = environ.get('PICS', '')
@@ -38,6 +38,10 @@ MAIN_BOT_USERNAME = environ.get("MAIN_BOT_USERNAME", BOT_USERNAME)
 
 # একজন ইউজার সর্বোচ্চ কয়টা ক্লোন বানাতে পারবে (ডিফল্ট ১টা)
 MAX_CLONE_PER_USER = int(environ.get("MAX_CLONE_PER_USER", "1"))
+
+# ✨ About পেজে "Developer" হিসেবে যাকে ক্রেডিট দেখানো হবে (আপনার Telegram user ID)।
+# খালি রাখলে শুধু স্টাইলড টেক্সট দেখাবে, ক্লিকযোগ্য মেনশন দেখাবে না।
+MAIN_OWNER_ID = int(environ.get("MAIN_OWNER_ID", "5926160191")) or None
 
 # ক্লোনদের নিজস্ব ডাটাবেসগুলো কোন MongoDB cluster-এ থাকবে।
 # আলাদা করে না দিলে মূল DB_URL-এর cluster-ই ব্যবহার হবে, শুধু প্রতিটা
