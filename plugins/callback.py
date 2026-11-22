@@ -102,7 +102,20 @@ async def cb_handler(client: Client, query: CallbackQuery):
             if custom_about:
                 top_block = custom_about
             else:
-                owner_mention = getattr(client, "owner_mention", None) or f"<code>{getattr(client, 'owner_id', 'Unknown')}</code>"
+                # ✨ owner_mention ক্যাশ করা না থাকলে (পুরনো ক্লোন) লাইভ fetch করে
+                # নিজে থেকেই ঠিক করে নেয়, এবং পরের বার থেকে দ্রুত হওয়ার জন্য ক্যাশ করে রাখে
+                owner_mention = getattr(client, "owner_mention", None)
+                owner_id_val = getattr(client, "owner_id", None)
+                if not owner_mention and owner_id_val:
+                    try:
+                        owner_user = await client.get_users(owner_id_val)
+                        owner_mention = owner_user.mention
+                        client.owner_mention = owner_mention
+                        await clone_db.update_clone_settings(client.bot_id, {"owner_mention": owner_mention})
+                    except Exception:
+                        owner_mention = f"<code>{owner_id_val}</code>"
+                owner_mention = owner_mention or f"<code>{owner_id_val or 'Unknown'}</code>"
+
                 if MAIN_OWNER_ID:
                     dev_line = f"<a href='tg://user?id={MAIN_OWNER_ID}'>ᴍʀ.ᴘʀɪᴍᴇ</a>"
                 else:
@@ -113,7 +126,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
                     f"║┣⪼🤖{sc('my name')} : {bot_mention}\n"
                     f"║┣⪼❣️{sc('my owner')} : {owner_mention}\n"
                     f"║┣⪼👨‍💻{sc('developer')} : {dev_line}\n"
-                    f"║┣⪼📡{sc('hosted on')} : {sc('Super Premium Advanced Server')}\n"
+                    f"║┣⪼📡{sc('hosted on')} : {sc('Super Advanced Server')}\n"
                     f"║┣⪼🗣️{sc('language')} : {sc('python')}\n"
                     f"║┣⪼📚{sc('library')} : {sc('pyrogram')}\n"
                     f"║┣⪼🗒️{sc('version')} : 2.60.00[{sc('stable')}]\n"
