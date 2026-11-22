@@ -145,3 +145,39 @@ async def check_verification(bot, userid: int) -> bool:
     if exp_date < today or (exp_date == today and exp_time < current_time):
         return False
     return True
+
+
+# ================= ✨ "Sᴜᴘᴇʀ Pʀᴇᴍɪᴜᴍ" স্টাইল টেক্সট হেল্পার ✨ =================
+_SMALLCAPS_MAP = {
+    'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ꜰ', 'g': 'ɢ',
+    'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ',
+    'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ', 's': 'ꜱ', 't': 'ᴛ', 'u': 'ᴜ',
+    'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ',
+}
+
+
+def sc(text: str) -> str:
+    """
+    'Sᴜᴘᴇʀ Pʀᴇᴍɪᴜᴍ' স্টাইলের টেক্সটে কনভার্ট করে — প্রতিটা শব্দের প্রথম অক্ষর
+    সাধারণ বড় হাতের, আর বাকি অক্ষরগুলো small-caps ইউনিকোডে। ইমোজি, সংখ্যা,
+    চিহ্ন অপরিবর্তিত থাকে।
+    """
+    out_words = []
+    for word in text.split(' '):
+        if not word:
+            out_words.append(word)
+            continue
+        result = []
+        first_letter_done = False
+        for ch in word:
+            low = ch.lower()
+            if low.isalpha() and low in _SMALLCAPS_MAP:
+                if not first_letter_done:
+                    result.append(ch.upper())
+                    first_letter_done = True
+                else:
+                    result.append(_SMALLCAPS_MAP[low])
+            else:
+                result.append(ch)
+        out_words.append(''.join(result))
+    return ' '.join(out_words)
