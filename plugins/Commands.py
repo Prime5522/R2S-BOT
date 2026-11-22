@@ -12,6 +12,34 @@ from plugins.verification import handle_verify_case, av_verification
 from plugins.clone import build_start_content, send_clone_entry, send_start_reply_safely
 
 
+async def show_clone_loading_screen(client: Client, message: Message):
+    """
+    ✨ ক্লোন বট থেকে ফাইল ডেলিভারির ঠিক আগে ২ সেকেন্ডের একটা ছোট্ট, প্রিমিয়াম
+    লুকিং লোডিং স্ক্রিন দেখায় (Source Code বাটনসহ), তারপর নিজে থেকেই মুছে যায়।
+    """
+    btn = None
+    if CLONE_SOURCE_CODE_URL:
+        btn = InlineKeyboardMarkup([[InlineKeyboardButton("👨‍💻 Source Code", url=CLONE_SOURCE_CODE_URL)]])
+
+    frames = [
+        "⏳ <b>Fetching your file...</b>\n▰▱▱▱▱▱▱▱▱▱ 10%",
+        "⏳ <b>Fetching your file...</b>\n▰▰▰▰▰▱▱▱▱▱ 50%",
+        "⏳ <b>Fetching your file...</b>\n▰▰▰▰▰▰▰▰▰▰ 100%",
+    ]
+    try:
+        loading_msg = await message.reply_text(frames[0], reply_markup=btn)
+        for frame in frames[1:]:
+            await asyncio.sleep(0.7)
+            try:
+                await loading_msg.edit_text(frame, reply_markup=btn)
+            except Exception:
+                pass
+        await asyncio.sleep(0.6)
+        await loading_msg.delete()
+    except Exception:
+        pass  # লোডিং স্ক্রিন ব্যর্থ হলেও ফাইল ডেলিভারি আটকাবে না
+
+
 def build_file_delivery_markup(bot: Client, base_rows: list = None):
     """
     ✨ ফাইল ডেলিভারি বাটন: ক্লোন ওনার Manage Clone প্যানেল থেকে যে বাটন(গুলো)
@@ -159,6 +187,10 @@ async def start(client: Client, message: Message):
                 return
 
             cur_db = get_db(client)
+
+            # ✨ ক্লোন বট হলে ফাইল পাঠানোর ঠিক আগে ২ সেকেন্ডের লোডিং স্ক্রিন দেখাবে
+            if getattr(client, "is_clone", False):
+                await show_clone_loading_screen(client, message)
 
             if file_id_str.startswith("c_"):
                 file_doc = await cur_db.get_clone_file(file_id_str)
