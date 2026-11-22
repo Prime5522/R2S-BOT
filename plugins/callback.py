@@ -7,6 +7,7 @@ from utils import get_hash
 from Script import script
 from plugins.save_media import save_batch_media_in_channel, save_media_in_channel
 from database.clonedb import clone_db
+from utils import sc
 from plugins.clone import (
     build_start_content,
     handle_clone_callback,
@@ -87,8 +88,8 @@ async def cb_handler(client: Client, query: CallbackQuery):
 
     elif query.data == "about":
         buttons = [[
-            InlineKeyboardButton('• Home •', callback_data='start'),
-            InlineKeyboardButton('• Close •', callback_data='close_data')
+            InlineKeyboardButton(sc('• Home •'), callback_data='start'),
+            InlineKeyboardButton(sc('• Close •'), callback_data='close_data')
         ]]
         reply_markup = InlineKeyboardMarkup(buttons)
 
@@ -101,19 +102,23 @@ async def cb_handler(client: Client, query: CallbackQuery):
             if custom_about:
                 top_block = custom_about
             else:
-                owner_mention = getattr(client, "owner_mention", None)
-                owner_line = f"<b>║ 👤 Owner:</b> {owner_mention}\n" if owner_mention else ""
+                owner_mention = getattr(client, "owner_mention", None) or f"<code>{getattr(client, 'owner_id', 'Unknown')}</code>"
+                if MAIN_OWNER_ID:
+                    dev_line = f"<a href='tg://user?id={MAIN_OWNER_ID}'>ᴍʀ.ᴘʀɪᴍᴇ</a>"
+                else:
+                    dev_line = "ᴍʀ.ᴘʀɪᴍᴇ"
                 top_block = (
-                    f"<b>╔══❰ 🤖 About {bot_mention} ❱══❍</b>\n"
-                    f"<b>║</b>\n"
-                    f"<b>║ 🤖 Bot Name:</b> {bot_name}\n"
-                    f"<b>║ 🔗 Username:</b> @{bot_username}\n"
-                    f"{owner_line}"
-                    f"<b>║ 📁 Service:</b> Fast &amp; Secure File Storage\n"
-                    f"<b>║ 🗣️ Language:</b> Python\n"
-                    f"<b>║ 📚 Library:</b> Pyrogram\n"
-                    f"<b>║</b>\n"
-                    f"<b>╚══════════════════════❍</b>"
+                    f"╔══❰ {bot_mention} ❱═════❍\n"
+                    f"║╭━━━━━━━━━━━━━━━━━━➣\n"
+                    f"║┣⪼🤖{sc('my name')} : {bot_mention}\n"
+                    f"║┣⪼❣️{sc('my owner')} : {owner_mention}\n"
+                    f"║┣⪼👨‍💻{sc('developer')} : {dev_line}\n"
+                    f"║┣⪼📡{sc('hosted on')} : {sc('Super Premium Advanced Server')}\n"
+                    f"║┣⪼🗣️{sc('language')} : {sc('python')}\n"
+                    f"║┣⪼📚{sc('library')} : {sc('pyrogram')}\n"
+                    f"║┣⪼🗒️{sc('version')} : 2.60.00[{sc('stable')}]\n"
+                    f"║╰━━━━━━━━━━━━━➣\n"
+                    f"╚══════════════════❍"
                 )
 
             # ✨ এই লাইনটা ফিক্সড — ক্লোন ওনার About টেক্সট যত ইচ্ছা কাস্টমাইজ করুক,
@@ -133,39 +138,38 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await clear_pending_input(client, user_id)
         start_pic, start_pic_bytes, caption_text, reply_markup = await build_start_content(client, query.from_user.mention)
 
-        if query.message.photo:
-            if start_pic or start_pic_bytes:
-                try:
-                    return await query.message.edit_caption(
-                        caption=caption_text,
-                        reply_markup=reply_markup,
-                        parse_mode=enums.ParseMode.HTML,
-                    )
-                except Exception:
-                    pass
+        # ✨ পিকচার দেখাতে হলে সবসময় মেসেজ ডিলিট করে নতুন করে পাঠানো হয় (edit_caption
+        # শুধু ক্যাপশন বদলায়, পুরনো ছবিটাই রয়ে যায় — তাই এটা ব্যবহার করা হয় না)।
+        if start_pic or start_pic_bytes:
             try:
                 await query.message.delete()
             except Exception:
                 pass
             return await send_start_reply_safely(client, query.message, start_pic, start_pic_bytes, caption_text, reply_markup)
-        else:
-            if start_pic or start_pic_bytes:
-                try:
-                    await query.message.delete()
-                except Exception:
-                    pass
-                return await send_start_reply_safely(client, query.message, start_pic, start_pic_bytes, caption_text, reply_markup)
-            await query.message.edit_text(
+
+        if query.message.photo:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return await query.message.reply_text(
                 text=caption_text,
                 reply_markup=reply_markup,
                 parse_mode=enums.ParseMode.HTML,
                 disable_web_page_preview=True,
             )
 
+        await query.message.edit_text(
+            text=caption_text,
+            reply_markup=reply_markup,
+            parse_mode=enums.ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
     elif query.data == "help":
         buttons = [[
-            InlineKeyboardButton('• Home •', callback_data='start'),
-            InlineKeyboardButton('• Close •', callback_data='close_data')
+            InlineKeyboardButton(sc('• Home •'), callback_data='start'),
+            InlineKeyboardButton(sc('• Close •'), callback_data='close_data')
         ]]
         reply_markup = InlineKeyboardMarkup(buttons)
         if getattr(client, "is_clone", False):
