@@ -1,5 +1,6 @@
 import io
 import re
+import time
 from bson.binary import Binary
 from pyrogram import Client, filters, enums
 from pyrogram.types import (
@@ -12,12 +13,15 @@ from pyrogram.errors import UserNotParticipant
 from config import (
     MAIN_BOT_USERNAME, MAX_CLONE_PER_USER, PICS,
     CLONE_CREATION_FSUB_CHANNEL, CLONE_CREATION_FSUB_INVITE,
+    MODERATOR_DURATION_HOURS,
 )
 from Script import script
 from database import get_db, get_clone_database
-from database.clonedb import clone_db
+from database.clonedb import clone_db, has_clone_access, is_owner, active_moderators
 from clone_manager import start_clone, stop_clone, restart_clone, delete_clone, RUNNING_CLONES
-from utils import sc
+from utils import sc, format_duration, short_duration, resolve_user_ref, parse_duration
+from bot_commands import set_staff_commands, clear_staff_commands
+from plugins.send_file import MIN_AUTODELETE_SECONDS, MAX_AUTODELETE_SECONDS
 
 # Per-(bot_id, user_id) input state store — completely isolated across users
 PENDING_INPUTS: dict = {}
@@ -321,6 +325,45 @@ async def _finalize_clone_creation(client: Client, reply_target, user_id: int, t
     )
 
 
+async def start_creation_flow(client: Client, target, is_callback: bool):
+    user_id = target.from_user.id
+    await clear_pending_input(client, user_id)
+    back_cb = "start" if is_callback else "close_data"
+    await set_pending_input(client, user_id, action="awaiting_botfather_forward", back_cb=back_cb)
+
+    text = (
+        "<b>✨ Create Your Own Clone Bot</b>\n\n"
+        "Follow these quick steps to create your personal File Store Bot:\n\n"
+        "1️⃣ Open @BotFather and create a new bot with <code>/newbot</code> (or open an existing bot's token message).\n"
+        "2️⃣ <b>Forward</b> the message containing the Bot Token from @BotFather directly to this chat.\n\n"
+        "⚠️ <i>Do not send the token as plain text — you must forward the original message from @BotFather.</i>\n\n"
+        "Send /cancel anytime to cancel."
+    )
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="clone_cancel_input")]])
+    if is_callback:
+        return await send_or_edit_text(target, text, markup)
+    return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+
+
+async def show_moderated_list(target, clones: list, is_callback: bool):
+    """যে ইউজারের নিজের ক্লোন নেই কিন্তু অন্য ক্লোনের মডারেটর — তার জন্য লিস্ট"""
+    now = time.time()
+    text = "<b>👮 You are a moderator</b>\n\nYou have temporary full access to these clone bots:\n"
+    buttons = []
+    uid = target.from_user.id
+    for c in clones:
+        mod = next((m for m in active_moderators(c) if int(m["user_id"]) == int(uid)), None)
+        left = format_duration(max(0, mod["expires_at"] - now)) if mod else "—"
+        text += f"\n• @{c.get('bot_username')} — ⏳ {left} left"
+        buttons.append([InlineKeyboardButton(sc(f"⚙️ Manage @{c.get('bot_username')}"), callback_data=f"manage_clone#{c['bot_id']}")])
+    buttons.append([InlineKeyboardButton(f"✨ {CLONE_BTN_LABEL}", callback_data="clone_create_new")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data="start")])
+    markup = InlineKeyboardMarkup(buttons)
+    if is_callback:
+        return await send_or_edit_text(target, text, markup)
+    return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+
+
 async def send_clone_entry(client: Client, target, is_callback: bool = False):
     user_id = target.from_user.id
 
@@ -344,21 +387,14 @@ async def send_clone_entry(client: Client, target, is_callback: bool = False):
         # ✨ আগে থেকেই ক্লোন থাকলে এক্সট্রা ক্লিক ছাড়াই সরাসরি কাস্টমাইজ প্যানেলে নিয়ে যাওয়া হয়
         return await show_manage_clone_panel(target, existing, is_callback=is_callback)
 
-    back_cb = "start" if is_callback else "close_data"
-    await set_pending_input(client, user_id, action="awaiting_botfather_forward", back_cb=back_cb)
+    # ✨ অন্য কারো ক্লোনের (মেয়াদ-থাকা) মডারেটর হলে সেই প্যানেল
+    moderated = await clone_db.get_moderated_clones(user_id)
+    if moderated:
+        if len(moderated) == 1:
+            return await show_manage_clone_panel(target, moderated[0], is_callback=is_callback)
+        return await show_moderated_list(target, moderated, is_callback)
 
-    text = (
-        "<b>✨ Create Your Own Clone Bot</b>\n\n"
-        "Follow these quick steps to create your personal File Store Bot:\n\n"
-        "1️⃣ Open @BotFather and create a new bot with <code>/newbot</code> (or open an existing bot's token message).\n"
-        "2️⃣ <b>Forward</b> the message containing the Bot Token from @BotFather directly to this chat.\n\n"
-        "⚠️ <i>Do not send the token as plain text — you must forward the original message from @BotFather.</i>\n\n"
-        "Send /cancel anytime to cancel."
-    )
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="clone_cancel_input")]])
-    if is_callback:
-        return await send_or_edit_text(target, text, markup)
-    return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+    return await start_creation_flow(client, target, is_callback)
 
 
 async def _get_owner_settings(clone_doc: dict):
@@ -370,6 +406,8 @@ async def _get_owner_settings(clone_doc: dict):
 async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = True):
     bot_id = clone_doc["bot_id"]
     owner_id = int(clone_doc["owner_id"])
+    viewer_id = int(target.from_user.id)
+    viewer_is_owner = viewer_id == owner_id
     bot_username = clone_doc.get("bot_username") or "Unknown"
     status = clone_doc.get("status", "active")
     status_label = "✅ Active" if status == "active" else "⛔ Inactive"
@@ -377,6 +415,7 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
 
     _, owner_settings = await _get_owner_settings(clone_doc)
     protect_on = bool(owner_settings.get("protect_content", False))
+    autodel_on = bool(owner_settings.get("auto_delete", True))
 
     text = (
         f"<b>✨ {sc('Clone Control Panel')} — @{bot_username}</b>\n\n"
@@ -385,6 +424,10 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
         f"{sc('Tap a category below to customize it:')}\n\n"
         f"🎨 <b>{sc('Start Screen')}</b> — {sc('what users see on /start (picture, welcome text, extra buttons)')}"
     )
+    if not viewer_is_owner:
+        mod = next((m for m in active_moderators(clone_doc) if int(m["user_id"]) == viewer_id), None)
+        if mod:
+            text += f"\n\n👮 <i>You are a temporary moderator — access ends in {format_duration(max(0, mod['expires_at'] - time.time()))}.</i>"
 
     sfx = f"{owner_id}#{bot_id}"
     buttons = [
@@ -401,34 +444,136 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
                 callback_data=f"clone_quick_protect#{bot_id}",
             ),
         ],
+        # ✨ Verify Settings ও Tutorial এখন Shortener-এর ভিতরে
         [
             InlineKeyboardButton(sc("🔗 Shortener Link"), callback_data=f"shortlink_setgs#{sfx}"),
-            InlineKeyboardButton(sc("✅ Verify Settings"), callback_data=f"verify_setgs#{sfx}"),
-        ],
-        [
             InlineKeyboardButton(sc("📢 Force Subscribe"), callback_data=f"force_channel_setgs#{sfx}"),
-            InlineKeyboardButton(sc("📜 Log Channel"), callback_data=f"log_channel_setgs#{sfx}"),
         ],
         [
-            InlineKeyboardButton(sc("🎬 Tutorial Link"), callback_data=f"tutorial_setgs#{sfx}"),
+            InlineKeyboardButton(sc("📜 Log Channel"), callback_data=f"log_channel_setgs#{sfx}"),
             InlineKeyboardButton(sc("🔗 Permanent Link"), callback_data=f"permanent_link_setgs#{sfx}"),
         ],
+        [
+            InlineKeyboardButton(sc(f"⏱ Auto Delete: {'ON ✅' if autodel_on else 'OFF ❌'}"), callback_data=f"autodelete_setgs#{sfx}"),
+        ],
+        [
+            InlineKeyboardButton(sc("📊 Status"), callback_data=f"clone_status#{bot_id}"),
+        ],
+    ]
+    if viewer_is_owner:
+        buttons[-1].append(InlineKeyboardButton(sc("👮 Moderator"), callback_data=f"clone_mods#{bot_id}"))
+    buttons += [
         [InlineKeyboardButton(sc("📑 Full Details"), callback_data=f"clone_details#{bot_id}")],
         [InlineKeyboardButton(sc("🔄 Reset All Clone Settings"), callback_data=f"clone_reset#{bot_id}")],
         [
             InlineKeyboardButton(sc("🔁 Restart"), callback_data=f"clone_restart#{bot_id}"),
             InlineKeyboardButton(sc(toggle_label), callback_data=f"clone_toggle#{bot_id}"),
         ],
-        [
-            InlineKeyboardButton(sc("🗑 Delete Clone"), callback_data=f"clone_delete#{bot_id}"),
-            InlineKeyboardButton(sc("« Back"), callback_data="clone_card"),
-        ],
     ]
+    # ✨ Back এখন সরাসরি Home-এ যায় (আগে "clone_card"-এ যেত, যা আবার এই একই প্যানেলই খুলত — তাই লুপ হতো)
+    if viewer_is_owner:
+        buttons.append([
+            InlineKeyboardButton(sc("🗑 Delete Clone"), callback_data=f"clone_delete#{bot_id}"),
+            InlineKeyboardButton(sc("« Back"), callback_data="start"),
+        ])
+    else:
+        buttons.append([InlineKeyboardButton(sc("« Back"), callback_data="start")])
 
     markup = InlineKeyboardMarkup(buttons)
     if is_callback:
         return await send_or_edit_text(target, text, markup)
     return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+
+
+# ================= ✨ STATUS (popup) ✨ =================
+
+async def build_status_popup(clone_doc: dict) -> str:
+    """টেলিগ্রাম অ্যালার্ট পপ-আপের সীমা ২০০ অক্ষর — তাই ছোট করে সাজানো"""
+    bot_id = int(clone_doc["bot_id"])
+    running = RUNNING_CLONES.get(bot_id)
+    cdb = get_clone_database(bot_id, clone_doc["db_name"])
+    owner_settings = await cdb.get_user(int(clone_doc["owner_id"]))
+
+    users = await cdb.total_users_count()
+    links = await cdb.files.count_documents({})
+    banned = await cdb.banned_count()
+    mods = len(active_moderators(clone_doc))
+
+    online = "🟢 Online" if running else "🔴 Offline"
+    state = "Active" if clone_doc.get("status") == "active" else "Inactive"
+    uptime = short_duration(time.time() - running.started_at) if running and getattr(running, "started_at", None) else "—"
+    ad = f"{short_duration(owner_settings.get('auto_delete_time') or 300)}" if owner_settings.get("auto_delete", True) else "OFF"
+
+    text = (
+        f"📊 @{clone_doc.get('bot_username')}\n"
+        f"{online} • {state}\n"
+        f"⏱ Uptime: {uptime}\n"
+        f"👥 Users: {users}  🔗 Links: {links}\n"
+        f"🚫 Banned: {banned}  👮 Mods: {mods}\n"
+        f"🗑 Auto Delete: {ad}"
+    )
+    return text[:200]
+
+
+# ================= ✨ MODERATOR PANEL ✨ =================
+
+async def show_mods_view(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    mods = active_moderators(clone_doc)
+    now = time.time()
+
+    text = (
+        "<b>👮 Moderators</b>\n\n"
+        f"A moderator gets <b>full access</b> to manage this clone for <b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>, "
+        "then it ends automatically.\n"
+        "<i>(Only you can add/remove moderators, transfer or delete the clone.)</i>\n"
+    )
+    if mods:
+        text += "\n<b>Active moderators:</b>\n"
+        for m in mods:
+            text += f"• <a href='tg://user?id={m['user_id']}'>{m.get('name') or m['user_id']}</a> (<code>{m['user_id']}</code>) — ⏳ {format_duration(max(0, m['expires_at'] - now))} left\n"
+    else:
+        text += "\nNo active moderators."
+
+    buttons = [
+        [
+            InlineKeyboardButton(sc("➕ Add"), callback_data=f"clone_modadd#{bot_id}"),
+            InlineKeyboardButton(sc("➖ Remove"), callback_data=f"clone_modrm_list#{bot_id}"),
+        ],
+        [InlineKeyboardButton(sc("🔄 Transfer Ownership"), callback_data=f"clone_transfer#{bot_id}")],
+        [InlineKeyboardButton(sc("« Back"), callback_data=f"manage_clone#{bot_id}")],
+    ]
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+async def show_mod_remove_list(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    mods = active_moderators(clone_doc)
+    back = f"clone_mods#{bot_id}"
+    if not mods:
+        return await send_or_edit_text(
+            target, "<b>➖ Remove Moderator</b>\n\nThere are no active moderators to remove.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back)]]),
+        )
+    buttons = [
+        [InlineKeyboardButton(f"❌ {m.get('name') or m['user_id']} ({m['user_id']})", callback_data=f"clone_modrm#{bot_id}#{m['user_id']}")]
+        for m in mods
+    ]
+    if len(mods) > 1:
+        buttons.append([InlineKeyboardButton("🗑 Remove All", callback_data=f"clone_modrm#{bot_id}#all")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data=back)])
+    return await send_or_edit_text(
+        target, "<b>➖ Remove Moderator</b>\n\nTap a moderator to remove their access right now:",
+        InlineKeyboardMarkup(buttons),
+    )
+
+
+async def _refresh_running_mods(bot_id: int):
+    running = RUNNING_CLONES.get(int(bot_id))
+    if running:
+        doc = await clone_db.get_clone(bot_id)
+        running.moderators = (doc or {}).get("moderators") or []
+    return running
 
 
 # ================= ✨ START APPEARANCE SUB-MENU ✨ =================
@@ -650,6 +795,8 @@ async def show_clone_details(target, clone_doc: dict):
         f"• Force Sub Channels: {len(owner_settings.get('fsub_channels') or [])}\n"
         f"• Log Channel: {'Set' if owner_settings.get('log_channel') else 'None'}\n"
         f"• Permanent Link Mode: {'ON' if owner_settings.get('permanent_link_mode') else 'OFF'}\n"
+        f"• Auto Delete: {format_duration(owner_settings.get('auto_delete_time') or 300) if owner_settings.get('auto_delete', True) else 'OFF'}\n"
+        f"• Active Moderators: {len(active_moderators(clone_doc))}\n"
     )
     buttons = [[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{bot_id}")]]
     return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
@@ -707,7 +854,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
         bot_id = int(data.split("#")[1])
         await clear_pending_input(client, user_id)
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ This clone does not belong to you.", show_alert=True)
             return True
         await show_manage_clone_panel(query, clone_doc, is_callback=True)
@@ -716,7 +863,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_quick_protect#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         clone_user_db = get_clone_database(bot_id, clone_doc["db_name"])
@@ -730,7 +877,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_setmsg#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -762,7 +909,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_delmsg#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         if not clone_doc.get("start_msg"):
@@ -781,7 +928,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_setpic#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -807,7 +954,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_delpic#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         if not (clone_doc.get("start_pic") or clone_doc.get("start_pic_bytes")):
@@ -827,7 +974,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_setbtns#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -856,7 +1003,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_delbtns#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         if not clone_doc.get("start_buttons"):
@@ -875,7 +1022,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_appearance#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await clear_pending_input(client, user_id)
@@ -885,7 +1032,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_viewpic#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await show_pic_view(client, query, clone_doc)
@@ -894,7 +1041,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_viewmsg#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await show_msg_view(query, clone_doc)
@@ -903,7 +1050,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_viewbtns#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await show_btns_view(query, clone_doc)
@@ -912,7 +1059,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_about_view#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await clear_pending_input(client, user_id)
@@ -922,7 +1069,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_setabout#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await set_pending_input(client, user_id, action="clone_setabout", back_cb=f"clone_about_view#{bot_id}", data={"bot_id": bot_id})
@@ -938,7 +1085,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_delabout#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         if not clone_doc.get("about_text"):
@@ -956,7 +1103,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_help_view#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await clear_pending_input(client, user_id)
@@ -966,7 +1113,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_sethelp#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await set_pending_input(client, user_id, action="clone_sethelp", back_cb=f"clone_help_view#{bot_id}", data={"bot_id": bot_id})
@@ -981,7 +1128,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_delhelp#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         if not clone_doc.get("help_text"):
@@ -999,7 +1146,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_filebtns_view#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await clear_pending_input(client, user_id)
@@ -1009,7 +1156,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_setfilebtns#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await set_pending_input(client, user_id, action="clone_setfilebtns", back_cb=f"clone_filebtns_view#{bot_id}", data={"bot_id": bot_id})
@@ -1028,7 +1175,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_delfilebtns#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         if not clone_doc.get("file_buttons"):
@@ -1046,7 +1193,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_reset_confirm#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -1078,7 +1225,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_reset#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -1098,7 +1245,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_details#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
         await show_clone_details(query, clone_doc)
@@ -1107,7 +1254,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_toggle#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -1117,7 +1264,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             await query.answer("⛔ Clone deactivated.")
         else:
             try:
-                await start_clone(clone_doc["bot_token"], user_id)
+                await start_clone(clone_doc["bot_token"], clone_doc["owner_id"])
                 await query.answer("✅ Clone activated.")
             except Exception as e:
                 await query.answer(f"❌ Failed to activate: {e}", show_alert=True)
@@ -1130,7 +1277,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_restart#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -1152,7 +1299,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_delete_confirm#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not is_owner(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -1167,7 +1314,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
     if data.startswith("clone_delete#"):
         bot_id = int(data.split("#")[1])
         clone_doc = await clone_db.get_clone(bot_id)
-        if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+        if not clone_doc or not is_owner(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
@@ -1180,6 +1327,167 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             "⚠️ <b>Are you sure you want to delete your clone?</b>\n\n"
             "This will permanently stop the cloned bot and erase all of its saved files and user data. This action cannot be undone.",
             btn,
+        )
+        return True
+
+    if data == "clone_create_new":
+        if await clone_db.get_user_clone(user_id):
+            await send_clone_entry(client, query, is_callback=True)
+            return True
+        await start_creation_flow(client, query, is_callback=True)
+        return True
+
+    # ---------------- ✨ Status popup ✨ ----------------
+    if data.startswith("clone_status#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await query.answer(await build_status_popup(clone_doc), show_alert=True)
+        return True
+
+    # ---------------- ✨ Moderator panel ✨ (শুধু ওনার) ----------------
+    if data.startswith("clone_mods#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            await query.answer("⚠️ Only the clone owner can manage moderators.", show_alert=True)
+            return True
+        await clear_pending_input(client, user_id)
+        await show_mods_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_modadd#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            await query.answer("⚠️ Only the clone owner can manage moderators.", show_alert=True)
+            return True
+        await set_pending_input(client, user_id, action="mod_add", back_cb=f"clone_mods#{bot_id}", data={"bot_id": bot_id})
+        await send_or_edit_text(
+            query,
+            "<b>➕ Add Moderator</b>\n\n"
+            "Send the user's <b>numeric ID</b>, their <b>@username</b>, or <b>forward any message</b> from them.\n\n"
+            f"They will get <b>full access</b> to this clone for <b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>.\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_mods#{bot_id}")]]),
+        )
+        return True
+
+    if data.startswith("clone_modrm_list#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            await query.answer("⚠️ Only the clone owner can manage moderators.", show_alert=True)
+            return True
+        await show_mod_remove_list(query, clone_doc)
+        return True
+
+    if data.startswith("clone_modrm#"):
+        _, bot_id_s, target_s = data.split("#")
+        bot_id = int(bot_id_s)
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            await query.answer("⚠️ Only the clone owner can manage moderators.", show_alert=True)
+            return True
+        if target_s == "all":
+            removed = [int(m["user_id"]) for m in (clone_doc.get("moderators") or [])]
+            await clone_db.clear_moderators(bot_id)
+        else:
+            removed = [int(target_s)]
+            await clone_db.remove_moderator(bot_id, int(target_s))
+        running = await _refresh_running_mods(bot_id)
+        if running:
+            for uid in removed:
+                await clear_staff_commands(running, uid)
+        await query.answer("✅ Moderator access removed.")
+        clone_doc = await clone_db.get_clone(bot_id)
+        await show_mods_view(query, clone_doc)
+        return True
+
+    # ---------------- ✨ Transfer ownership ✨ (শুধু ওনার) ----------------
+    if data.startswith("clone_transfer#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            await query.answer("⚠️ Only the clone owner can transfer it.", show_alert=True)
+            return True
+        await set_pending_input(client, user_id, action="transfer_owner", back_cb=f"clone_mods#{bot_id}", data={"bot_id": bot_id})
+        await send_or_edit_text(
+            query,
+            "<b>🔄 Transfer Ownership</b>\n\n"
+            "Send the <b>numeric ID</b>, <b>@username</b>, or <b>forward a message</b> of the person who should become the new owner.\n\n"
+            "⚠️ <i>All your clone settings move to them and you lose control of this bot. "
+            "The new owner must not already have a clone.</i>\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_mods#{bot_id}")]]),
+        )
+        return True
+
+    if data.startswith("clone_transfer_confirm#"):
+        _, bot_id_s, new_uid_s = data.split("#")
+        bot_id, new_uid = int(bot_id_s), int(new_uid_s)
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            await query.answer("⚠️ Only the clone owner can transfer it.", show_alert=True)
+            return True
+        if await clone_db.get_user_clones_count(new_uid) >= MAX_CLONE_PER_USER:
+            await query.answer("⚠️ That user already has a clone. Transfer cancelled.", show_alert=True)
+            await show_mods_view(query, clone_doc)
+            return True
+
+        new_mention = f"<code>{new_uid}</code>"
+        new_name = str(new_uid)
+        try:
+            u = await client.get_users(new_uid)
+            new_mention, new_name = u.mention, (u.first_name or str(new_uid))
+        except Exception:
+            pass
+
+        # ওনারের সেটিংস (ক্যাপশন, শর্টনার, ভেরিফাই, ফোর্স-সাব...) নতুন ওনারের নামে কপি
+        cdb = get_clone_database(bot_id, clone_doc["db_name"])
+        old_settings = await cdb.get_user(int(clone_doc["owner_id"]))
+        keys = [
+            "custom_caption", "shortener_api", "base_site", "verify_api", "verify_site", "verify_expire",
+            "fsub_channels", "log_channel", "protect_content", "how_to_download", "verify",
+            "permanent_link_mode", "auto_delete", "auto_delete_time", "auto_delete_msg",
+        ]
+        fields = {k: old_settings[k] for k in keys if k in old_settings}
+        await cdb.users.update_one(
+            {"user_id": new_uid},
+            {"$set": fields, "$setOnInsert": {"user_id": new_uid, "name": new_name}},
+            upsert=True,
+        )
+
+        old_owner = int(clone_doc["owner_id"])
+        await clone_db.update_clone_settings(bot_id, {
+            "owner_id": new_uid, "owner_mention": new_mention, "moderators": [],
+        })
+        running = RUNNING_CLONES.get(bot_id)
+        if running:
+            for m in (running.moderators or []):
+                await clear_staff_commands(running, int(m["user_id"]))
+            running.owner_id = new_uid
+            running.owner_mention = new_mention
+            running.moderators = []
+            await clear_staff_commands(running, old_owner)
+            await set_staff_commands(running, new_uid)
+
+        try:
+            await client.send_message(
+                new_uid,
+                f"🎉 <b>You are now the owner of @{clone_doc.get('bot_username')}!</b>\n\n"
+                "Send /clone here to open its control panel.",
+            )
+        except Exception:
+            pass
+
+        await query.answer("✅ Ownership transferred!", show_alert=True)
+        await send_or_edit_text(
+            query,
+            f"✅ <b>Ownership of @{clone_doc.get('bot_username')} has been transferred to</b> {new_mention}.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back to Home", callback_data="start")]]),
         )
         return True
 
@@ -1201,7 +1509,8 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
 
     if message.text:
         first_word = message.text.strip().split()[0].lower().split("@")[0]
-        if first_word in ("/start", "/clone", "/settings", "/stats", "/restart", "/broadcast", "/pin_broadcast"):
+        if first_word in ("/start", "/clone", "/settings", "/stats", "/restart", "/broadcast", "/pin_broadcast",
+                          "/batch", "/done", "/ban", "/unban", "/banlist"):
             PENDING_INPUTS.pop(state_key, None)
             return
 
@@ -1448,6 +1757,103 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
         await message.stop_propagation()
         return
 
+    if action == "mod_add":
+        target_bot_id = int(data["bot_id"])
+        clone_doc = await clone_db.get_clone(target_bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            PENDING_INPUTS.pop(state_key, None)
+            await message.reply_text("⚠️ Only the clone owner can add moderators.")
+            await message.stop_propagation()
+            return
+
+        res = await resolve_user_ref(client, message)
+        if not res:
+            await message.reply_text(
+                "❌ Couldn't find that user. Send a numeric ID, @username or forward a message from them (or /cancel).",
+                reply_markup=back_markup,
+            )
+            await message.stop_propagation()
+            return
+        if res["is_bot"]:
+            await message.reply_text("❌ A bot can't be a moderator.", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+        if int(res["id"]) == int(clone_doc["owner_id"]):
+            await message.reply_text("ℹ️ You are the owner already.", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+
+        PENDING_INPUTS.pop(state_key, None)
+        expires_at = time.time() + MODERATOR_DURATION_HOURS * 3600
+        await clone_db.add_moderator(target_bot_id, res["id"], expires_at, user_id, name=res["name"])
+        running = await _refresh_running_mods(target_bot_id)
+        if running:
+            await set_staff_commands(running, res["id"])
+
+        try:
+            await client.send_message(
+                res["id"],
+                f"👮 <b>You are now a moderator of @{clone_doc.get('bot_username')}!</b>\n\n"
+                f"You have full access for <b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>.\n"
+                "Send /clone here to open its control panel, or use the staff commands inside that bot "
+                "(/broadcast, /ban, /unban, /banlist).",
+            )
+        except Exception:
+            pass
+
+        await message.reply_text(
+            f"✅ {res['mention']} (<code>{res['id']}</code>) is now a moderator for "
+            f"<b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>."
+        )
+        clone_doc = await clone_db.get_clone(target_bot_id)
+        await show_mods_view(message, clone_doc)
+        await message.stop_propagation()
+        return
+
+    if action == "transfer_owner":
+        target_bot_id = int(data["bot_id"])
+        clone_doc = await clone_db.get_clone(target_bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            PENDING_INPUTS.pop(state_key, None)
+            await message.reply_text("⚠️ Only the clone owner can transfer it.")
+            await message.stop_propagation()
+            return
+
+        res = await resolve_user_ref(client, message)
+        if not res:
+            await message.reply_text(
+                "❌ Couldn't find that user. Send a numeric ID, @username or forward a message from them (or /cancel).",
+                reply_markup=back_markup,
+            )
+            await message.stop_propagation()
+            return
+        if res["is_bot"]:
+            await message.reply_text("❌ A bot can't own a clone.", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+        if int(res["id"]) == int(user_id):
+            await message.reply_text("ℹ️ You are the owner already.", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+        if await clone_db.get_user_clones_count(res["id"]) >= MAX_CLONE_PER_USER:
+            await message.reply_text("❌ That user already has a clone, so they can't receive another one.", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+
+        PENDING_INPUTS.pop(state_key, None)
+        await message.reply_text(
+            f"⚠️ <b>Transfer @{clone_doc.get('bot_username')} to</b> {res['mention']} (<code>{res['id']}</code>)?\n\n"
+            "You will <b>lose all control</b> of this bot. This cannot be undone.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Yes, Transfer", callback_data=f"clone_transfer_confirm#{target_bot_id}#{res['id']}"),
+                    InlineKeyboardButton("❌ No", callback_data=f"clone_mods#{target_bot_id}"),
+                ]
+            ]),
+        )
+        await message.stop_propagation()
+        return
+
     target_uid = int(data["target_uid"])
     clone_bot_id = data.get("clone_bot_id")
     cur_db = await resolve_target_db(client, clone_bot_id)
@@ -1633,5 +2039,44 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
             f"✅ Successfully added your log channel: <b>{chat.title}</b>",
             reply_markup=back_markup,
         )
+        await message.stop_propagation()
+        return
+
+    if action == "set_autodelete_time":
+        if not message.text:
+            await message.reply_text("❌ Please send a time like <code>30s</code>, <code>5m</code> or <code>2h</code>.", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+        try:
+            seconds = parse_duration(message.text)
+        except Exception:
+            await message.reply_text("❌ Invalid format. Example: <code>30s</code>, <code>5m</code>, <code>2h</code>", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+        if seconds < MIN_AUTODELETE_SECONDS or seconds > MAX_AUTODELETE_SECONDS:
+            await message.reply_text(
+                f"❌ Time must be between <b>{format_duration(MIN_AUTODELETE_SECONDS)}</b> and <b>{format_duration(MAX_AUTODELETE_SECONDS)}</b>.",
+                reply_markup=back_markup,
+            )
+            await message.stop_propagation()
+            return
+
+        PENDING_INPUTS.pop(state_key, None)
+        await cur_db.update_user_info(target_uid, {"auto_delete_time": seconds})
+        await message.reply_text(
+            f"✅ Auto Delete time updated to <b>{format_duration(seconds)}</b>.",
+            reply_markup=back_markup,
+        )
+        await message.stop_propagation()
+        return
+
+    if action == "set_autodelete_msg":
+        if not message.text:
+            await message.reply_text("❌ Please send the message as text.", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+        PENDING_INPUTS.pop(state_key, None)
+        await cur_db.update_user_info(target_uid, {"auto_delete_msg": message.text})
+        await message.reply_text("✅ Auto Delete message updated!", reply_markup=back_markup)
         await message.stop_propagation()
         return
