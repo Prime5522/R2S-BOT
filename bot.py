@@ -2,7 +2,9 @@ from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, PORT, ADMINS
 from aiohttp import web
 from route import web_server
-from clone_manager import load_all_clones
+from clone_manager import load_all_clones, moderator_cleanup_loop
+from bot_commands import set_public_commands, set_staff_commands
+import asyncio
 import pytz
 from datetime import date, datetime
 
@@ -51,6 +53,15 @@ class Bot(Client):
             print("✨ All Saved Clones Restored ✨")
         except Exception as e:
             print(f"❌ Failed to restore clones: {e}")
+
+        # ✨ মূল বটের কমান্ড মেনু + মডারেটর মেয়াদ-ক্লিনআপ
+        try:
+            await set_public_commands(self)
+            for admin in (ADMINS if isinstance(ADMINS, list) else [ADMINS]):
+                await set_staff_commands(self, admin)
+        except Exception as e:
+            print(f"❌ Command setup failed: {e}")
+        asyncio.create_task(moderator_cleanup_loop())
 
         if isinstance(ADMINS, list):
             for admin in ADMINS:
