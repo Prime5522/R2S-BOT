@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -7,6 +8,7 @@ from pyrogram.errors import RPCError
 from config import API_ID, API_HASH, BOT_TOKEN, MAX_CLONE_PER_USER
 from database import get_clone_database, drop_clone_database
 from database.clonedb import clone_db
+from bot_commands import set_public_commands, set_staff_commands, clear_staff_commands
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +93,20 @@ async def start_clone(bot_token: str, owner_id: int, owner_mention: str = None):
     clone_client.custom_help_txt = clone_doc.get("help_text")
     clone_client.custom_file_buttons = clone_doc.get("file_buttons") or []
     clone_client.owner_mention = clone_doc.get("owner_mention")
+    clone_client.moderators = clone_doc.get("moderators") or []
+    clone_client.started_at = time.time()
 
     RUNNING_CLONES[bot_id] = clone_client
+
+    # ✨ ক্লোন হওয়ার সাথে সাথেই কমান্ড মেনু সেট (সবার জন্য + ওনার/মডারেটরদের জন্য আলাদা)
+    try:
+        await set_public_commands(clone_client)
+        await set_staff_commands(clone_client, int(owner_id))
+        for m in clone_client.moderators:
+            if m.get("expires_at", 0) > time.time():
+                await set_staff_commands(clone_client, int(m["user_id"]))
+    except Exception as e:
+        logger.warning(f"Command setup failed for @{me.username}: {e}")
     logger.info(f"Clone started: @{me.username} ({bot_id}) owner={owner_id}")
     return me
 
@@ -130,4 +144,20 @@ async def load_all_clones():
             await start_clone(c["bot_token"], c["owner_id"])
         except (RPCError, Exception) as e:
             logger.error(f"Failed to restore clone @{c.get('bot_username')}: {e}")
-            
+
+
+async def moderator_cleanup_loop(interval: int = 600):
+    """মেয়াদ-শেষ মডারেটরদের নিজে থেকে সরিয়ে দেয় (ডাটাবেস + কমান্ড মেনু)"""
+    while True:
+        await asyncio.sleep(interval)
+        for bot_id, client in list(RUNNING_CLONES.items()):
+            try:
+                expired = await clone_db.purge_expired_moderators(bot_id)
+                if not expired:
+                    continue
+                doc = await clone_db.get_clone(bot_id)
+                client.moderators = (doc or {}).get("moderators") or []
+                for uid in expired:
+                    await clear_staff_commands(client, uid)
+            except Exception as e:
+                logger.warning(f"Moderator cleanup failed for {bot_id}: {e}")
