@@ -59,3 +59,11 @@ CLONE_CREATION_FSUB_INVITE = environ.get("CLONE_CREATION_FSUB_INVITE", "")
 
 # ✨ ক্লোন বট থেকে ফাইল ডেলিভারির আগে ২ সেকেন্ডের লোডিং স্ক্রিনে এই বাটন দেখাবে
 CLONE_SOURCE_CODE_URL = environ.get("CLONE_SOURCE_CODE_URL", "https://t.me/PrimeXBots")
+
+
+# ================= ✨ NEW FEATURE SETTINGS ✨ =================
+# মডারেটর কতক্ষণের জন্য সব ক্ষমতা পাবে (ঘণ্টায়) — ডিফল্ট ২৪ ঘণ্টা (একদিন)
+MODERATOR_DURATION_HOURS = int(environ.get("MODERATOR_DURATION_HOURS", "24"))
+
+# Auto Delete-এর ডিফল্ট সময় (সেকেন্ডে) — ডিফল্ট ৫ মিনিট
+DEFAULT_AUTO_DELETE_TIME = int(environ.get("DEFAULT_AUTO_DELETE_TIME", "300"))
