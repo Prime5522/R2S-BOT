@@ -31,9 +31,8 @@ async def settings_command(client: Client, message: Message):
     buttons = [
         [InlineKeyboardButton("📝 Caption Settings", callback_data=f"caption_setgs#{user_id}")],
         [InlineKeyboardButton("🔗 Set Shortener", callback_data=f"shortlink_setgs#{user_id}")],
-        [InlineKeyboardButton("✅ Verify Settings", callback_data=f"verify_setgs#{user_id}")],
         [InlineKeyboardButton("🔗 Permanent Link", callback_data=f"permanent_link_setgs#{user_id}")],
-        [InlineKeyboardButton("🎬 Tutorial Settings", callback_data=f"tutorial_setgs#{user_id}")],
+        [InlineKeyboardButton("⏱ Auto Delete", callback_data=f"autodelete_setgs#{user_id}")],
         [InlineKeyboardButton("🛡 Protect Settings", callback_data=f"update_protect_mode#{user_id}")],
         [InlineKeyboardButton("📢 Force Subscribe", callback_data=f"force_channel_setgs#{user_id}")],
         [InlineKeyboardButton("📢 Log Channel", callback_data=f"log_channel_setgs#{user_id}")],
