@@ -1,5 +1,7 @@
 import asyncio
 import traceback
+from urllib.parse import quote
+
 from config import DB_CHANNEL, LOG_CHANNEL, WEBSITE_URL
 from pyrogram import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -10,32 +12,61 @@ from database import get_db
 BATCH_SLEEP = 2
 
 
+def effective_owner(bot: Client, uid: int) -> int:
+    """
+    ক্লোন বটে সেটিংস (ক্যাপশন, শর্টনার, ভেরিফাই, অটো-ডিলিট...) সবসময় ক্লোনের
+    বর্তমান ওনারের — যে-ই ফাইল আপলোড করুক। এতে মালিকানা ট্রান্সফার/মডারেটর ঠিকমতো কাজ করে।
+    """
+    if getattr(bot, "is_clone", False) and getattr(bot, "owner_id", None):
+        return int(bot.owner_id)
+    return int(uid)
+
+
+def _caption_html(msg: Message):
+    cap = getattr(msg, "caption", None)
+    if not cap:
+        return None
+    try:
+        return cap.html
+    except Exception:
+        return str(cap)
+
+
 def extract_media_info(msg: Message):
+    """
+    ফাইলের তথ্য। has_name=False মানে ফাইলের নিজের কোনো নাম নেই — তখন ইউজার ফাইলের
+    সাথে যে ক্যাপশন দিয়েছে সেটাই ডেলিভারির সময় ক্যাপশন হিসেবে যাবে।
+    """
+    media, default_name, size = None, None, 0
     if msg.document:
-        return {
-            "file_id": msg.document.file_id,
-            "file_name": msg.document.file_name or "Document",
-            "file_size": humanbytes(msg.document.file_size),
-        }
-    if msg.video:
-        return {
-            "file_id": msg.video.file_id,
-            "file_name": msg.video.file_name or "Video.mp4",
-            "file_size": humanbytes(msg.video.file_size),
-        }
-    if msg.audio:
-        return {
-            "file_id": msg.audio.file_id,
-            "file_name": msg.audio.file_name or "Audio.mp3",
-            "file_size": humanbytes(msg.audio.file_size),
-        }
-    if msg.photo:
-        return {
-            "file_id": msg.photo.file_id,
-            "file_name": "Photo.jpg",
-            "file_size": humanbytes(msg.photo.file_size),
-        }
-    return None
+        media, default_name = msg.document, "Document"
+    elif msg.video:
+        media, default_name = msg.video, "Video.mp4"
+    elif msg.audio:
+        media, default_name = msg.audio, "Audio.mp3"
+    elif msg.photo:
+        media, default_name = msg.photo, "Photo.jpg"
+    if not media:
+        return None
+
+    real_name = None if msg.photo else getattr(media, "file_name", None)
+    return {
+        "file_id": media.file_id,
+        "file_name": real_name or default_name,
+        "has_name": bool(real_name),
+        "file_size": humanbytes(getattr(media, "file_size", 0)),
+        "caption": _caption_html(msg),
+    }
+
+
+def make_link(bot_username: str, code: str) -> str:
+    """https://t.me/<bot>?start=<পরিষ্কার-কোড> — কোনো file_ প্রিফিক্স বা = প্যাডিং নেই"""
+    return f"https://t.me/{bot_username}?start={code}"
+
+
+def legacy_permanent_link(owner_uid: int, db_msg_id: int) -> str:
+    # ওয়েবসাইট (Permanent Link) আগের ফরম্যাটেই কাজ করে — সেটা ভাঙা হয়নি
+    return f"{WEBSITE_URL}?AVBOTZ=file_{str_to_b64(f'{owner_uid}:{db_msg_id}')}"
 
 
 def build_share_buttons(is_clone: bool, share_link: str, short_link: str):
@@ -47,6 +78,9 @@ def build_share_buttons(is_clone: bool, share_link: str, short_link: str):
         ])
     if short_link != share_link:
         buttons.insert(0, [InlineKeyboardButton("🔗 Shortened Link", url=short_link)])
+    # ✨ Share বাটন (সবার নিচে): টেলিগ্রামের শেয়ার-পিকার খোলে
+    to_share = short_link or share_link
+    buttons.append([InlineKeyboardButton("📤 Share", url=f"https://t.me/share/url?url={quote(to_share, safe='')}")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -71,6 +105,7 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
     cur_db = get_db(bot)
     is_clone = getattr(bot, "is_clone", False)
     bot_username = getattr(bot, "username", None) or (await bot.get_me()).username
+    db_msg_id = None
 
     try:
         messages = await bot.get_messages(chat_id=editable.chat.id, message_ids=message_ids)
@@ -83,31 +118,31 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
                     items.append(info)
             if not items:
                 return await editable.edit("❌ No valid media files found in your batch!")
-            stored_id = await cur_db.save_clone_file(owner_uid, items)
-            unique_str = f"{owner_uid}:{stored_id}"
+            code = await cur_db.create_link(owner_uid, items=items)
         else:
-            message_ids_str = ""
+            sent_ids = []
             for message in messages:
                 sent_message = await copy_to_channel(bot, message, editable)
                 if sent_message:
-                    message_ids_str += f"{sent_message.id} "
+                    sent_ids.append(str(sent_message.id))
                 await asyncio.sleep(BATCH_SLEEP)
+            if not sent_ids:
+                return await editable.edit("❌ No valid media files found in your batch!")
 
             SaveMessage = await bot.send_message(
                 chat_id=DB_CHANNEL,
-                text=message_ids_str.strip(),
+                text=" ".join(sent_ids),
                 disable_web_page_preview=True,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close", callback_data="close_data")]])
             )
-            unique_str = f"{owner_uid}:{SaveMessage.id}"
+            db_msg_id = SaveMessage.id
+            code = await cur_db.create_link(owner_uid, db_msg_id=db_msg_id)
 
         user = await cur_db.get_user(owner_uid)
-        use_permanent_link = user.get("permanent_link_mode", False)
-
-        if use_permanent_link and not is_clone:
-            share_link = f"{WEBSITE_URL}?AVBOTZ=file_{str_to_b64(unique_str)}"
+        if user.get("permanent_link_mode", False) and not is_clone:
+            share_link = legacy_permanent_link(owner_uid, db_msg_id)
         else:
-            share_link = f"https://t.me/{bot_username}?start=file_{str_to_b64(unique_str)}"
+            share_link = make_link(bot_username, code)
 
         short_link = await cur_db.get_short_link(user, share_link)
 
@@ -154,24 +189,25 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
 
     try:
         if message.from_user:
-            owner_uid = message.from_user.id
+            uploader_uid = message.from_user.id
             user_name = message.from_user.first_name
         elif message.sender_chat:
-            owner_uid = message.sender_chat.id
+            uploader_uid = message.sender_chat.id
             user_name = message.sender_chat.title or "Channel"
         else:
-            owner_uid = 0
+            uploader_uid = 0
             user_name = "Unknown"
+        owner_uid = effective_owner(bot, uploader_uid)
 
+        db_msg_id = None
         if is_clone:
             info = extract_media_info(message)
             if not info:
                 return await editable.edit("❌ Unsupported file type!")
-            stored_id = await cur_db.save_clone_file(owner_uid, [info])
-            unique_str = f"{owner_uid}:{stored_id}"
+            code = await cur_db.create_link(owner_uid, items=[info])
         else:
             copied_msg = await message.copy(DB_CHANNEL)
-            file_er_id = str(copied_msg.id)
+            db_msg_id = copied_msg.id
             try:
                 await copied_msg.reply_text(
                     f"#PRIVATE_FILE:\n\n[{user_name}](tg://user?id={owner_uid}) Got File Link!",
@@ -179,15 +215,13 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
                 )
             except Exception:
                 pass
-            unique_str = f"{owner_uid}:{file_er_id}"
+            code = await cur_db.create_link(owner_uid, db_msg_id=db_msg_id)
 
         user = await cur_db.get_user(owner_uid)
-        use_permanent_link = user.get("permanent_link_mode", False)
-
-        if use_permanent_link and not is_clone:
-            share_link = f"{WEBSITE_URL}?AVBOTZ=file_{str_to_b64(unique_str)}"
+        if user.get("permanent_link_mode", False) and not is_clone:
+            share_link = legacy_permanent_link(owner_uid, db_msg_id)
         else:
-            share_link = f"https://t.me/{bot_username}?start=file_{str_to_b64(unique_str)}"
+            share_link = make_link(bot_username, code)
 
         short_link = await cur_db.get_short_link(user, share_link)
 
