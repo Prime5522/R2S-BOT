@@ -11,24 +11,24 @@ from pyrogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeCh
 logger = logging.getLogger(__name__)
 
 PUBLIC = [
-    ("start", "Start the bot"),
-    ("batch", "Upload many files as one batch link"),
-    ("done", "Finish batch & get the link"),
-    ("clone", "Create your own clone bot"),
+    ("start", "sᴛᴀʀᴛ ᴛʜᴇ ʙᴏᴛ 🚀"),
+    ("batch", "ᴜᴘʟᴏᴀᴅ ᴍᴜʟᴛɪᴘʟᴇ ғɪʟᴇs ᴀs ᴏɴᴇ ʙᴀᴛᴄʜ ʟɪɴᴋ 📦"),
+    ("done", "ғɪɴɪsʜ ʙᴀᴛᴄʜ & ɢᴇᴛ ʟɪɴᴋ 🔗"),
+    ("clone", "ᴄʀᴇᴀᴛᴇ ʏᴏᴜʀ ᴏᴡɴ ᴄʟᴏɴᴇ ʙᴏᴛ 🤖"),
 ]
 
 STAFF = PUBLIC + [
-    ("settings", "Open the settings panel"),
-    ("broadcast", "Broadcast a message (reply to it)"),
-    ("pin_broadcast", "Broadcast & pin (reply to it)"),
-    ("ban", "Ban a user"),
-    ("unban", "Unban a user"),
-    ("banlist", "Show all banned users"),
+    ("settings", "ᴏᴘᴇɴ sᴇᴛᴛɪɴɢs ᴘᴀɴᴇʟ ⚙️"),
+    ("broadcast", "ʙʀᴏᴀᴅᴄᴀsᴛ ᴀ ᴍᴇssᴀɢᴇ 📢"),
+    ("pin_broadcast", "ʙʀᴏᴀᴅᴄᴀsᴛ & ᴘɪɴ ᴍᴇssᴀɢᴇ 📌"),
+    ("ban", "ʙᴀɴ ᴀ ᴜsᴇʀ 🚫"),
+    ("unban", "ᴜɴʙᴀɴ ᴀ ᴜsᴇʀ ✅"),
+    ("banlist", "ᴠɪᴇᴡ ʙᴀɴɴᴇᴅ ᴜsᴇʀs 📋"),
 ]
 
 MAIN_ADMIN = STAFF + [
-    ("stats", "Bot statistics"),
-    ("restart", "Restart the bot"),
+    ("stats", "ᴠɪᴇᴡ ʙᴏᴛ sᴛᴀᴛɪsᴛɪᴄs 📊"),
+    ("restart", "ʀᴇsᴛᴀʀᴛ ᴛʜᴇ ʙᴏᴛ 🔄"),
 ]
 
 
