@@ -5,7 +5,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import *
 from Script import script
 from database import db, get_db
-from utils import temp, logger
+from utils import temp, logger, looks_like_link_code, str_to_b64
 
 # -------------------------- TOKEN VALIDITY CHECK --------------------------
 async def check_token(bot, userid: int, token: str) -> bool:
@@ -13,7 +13,7 @@ async def check_token(bot, userid: int, token: str) -> bool:
     return token in tokens and tokens[token] is False
 
 # -------------------------- TOKEN GENERATOR --------------------------
-async def get_token(bot, userid: int, link: str, owner_uid: int, file_id: int) -> str:
+async def get_token(bot, userid: int, link: str, owner_uid: int, file_id) -> str:
     db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     token = "".join(random.choices(string.ascii_letters + string.digits, k=7))
 
@@ -93,9 +93,8 @@ async def handle_verify_case(client, message, raw: str):
     db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     try:
         _, userid, data, token = raw.split("-", 3)
-        owner_uid, file_id = data.split(":")
+        owner_uid, file_id = data.split(":", 1)   # file_id এখন লিংক-কোড (স্ট্রিং) — পুরনো লিংকে সংখ্যা/c_xxx
         owner_uid = int(owner_uid)
-        file_id = int(file_id)
     except Exception:
         return await message.reply_text("<b>⚠️ Invalid or expired link. Try again!</b>")
 
@@ -109,10 +108,14 @@ async def handle_verify_case(client, message, raw: str):
 
     # ✅ verified होने के बाद file button देना
     bot_username = getattr(client, "username", None) or (await client.get_me()).username
+    if looks_like_link_code(file_id):
+        file_url = f"https://t.me/{bot_username}?start={file_id}"          # নতুন ছোট লিংক
+    else:
+        file_url = f"https://t.me/{bot_username}?start=file_{str_to_b64(f'{owner_uid}:{file_id}')}"  # পুরনো লিংক
     btn = [[
         InlineKeyboardButton(
             "Cʟɪᴄᴋ Hᴇʀᴇ Tᴏ Gᴇᴛ Fɪʟᴇ..🍁",
-            url=f"https://t.me/{bot_username}?start=file_{file_id}"
+            url=file_url
         )
     ]]
 
@@ -141,7 +144,7 @@ async def handle_verify_case(client, message, raw: str):
     return True
 
 # -------------------------- VERIFICATION ENTRY -------------------------- #
-async def av_verification(client, message, owner_uid: int = None, file_id: int = 0):
+async def av_verification(client, message, owner_uid: int = None, file_id="0"):
     db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     user_id = message.from_user.id
 
