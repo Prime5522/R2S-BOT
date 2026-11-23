@@ -2,12 +2,15 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
 import asyncio
+from urllib.parse import quote
 
 from config import VERIFY, HOW_TO_VERIFY, LOG_CHANNEL, DB_CHANNEL, IS_FSUB
 from utils import str_to_b64, check_verification, get_token
 from database import get_db
 from Script import script
 from plugins.fsub import get_fsub
+from plugins.save_media import save_media_in_channel, extract_media_info, make_link, effective_owner
+from plugins.batch import add_to_batch
 
 
 async def av_verification(client, message, owner_uid: int = None):
@@ -78,44 +81,47 @@ async def main(bot: Client, message):
                 pass
 
     if message.chat.type == enums.ChatType.PRIVATE:
-        await message.reply_text(
-            "<b>Choose an option below:</b>",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📦 Save in Batch", callback_data="addToBatchTrue")],
-                [InlineKeyboardButton("🔗 Get Shareable Link", callback_data="addToBatchFalse")]
-            ]),
-            quote=True,
-            disable_web_page_preview=True
-        )
+        # ✨ আর কোনো "Batch / Direct" অপশন আসে না:
+        #   • /batch চালু থাকলে → ব্যাচে যোগ হবে
+        #   • নইলে → সাথে সাথে ডাইরেক্ট লিংক
+        user = await db.get_user(user_id)
+        if user.get("batch_mode"):
+            return await add_to_batch(bot, message, db, user_id)
+
+        editable = await message.reply_text("⏳ Generating your link...", quote=True)
+        await save_media_in_channel(bot, editable, message)
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
     elif message.chat.type == enums.ChatType.CHANNEL:
         if message.forward_from_chat or message.forward_from:
             return
 
         try:
-            owner_uid = message.from_user.id if message.from_user else (message.sender_chat.id if message.sender_chat else 0)
+            uploader_uid = message.from_user.id if message.from_user else (message.sender_chat.id if message.sender_chat else 0)
+            owner_uid = effective_owner(bot, uploader_uid)
             bot_username = getattr(bot, "username", None) or (await bot.get_me()).username
 
             if getattr(bot, "is_clone", False):
-                from plugins.save_media import extract_media_info
                 info = extract_media_info(message)
                 if not info:
                     return
-                stored_id = await db.save_clone_file(owner_uid, [info])
-                unique_str = f"{owner_uid}:{stored_id}"
-                share_link = f"https://t.me/{bot_username}?start=file_{str_to_b64(unique_str)}"
+                code = await db.create_link(owner_uid, items=[info])
             else:
                 forwarded_msg = await message.forward(DB_CHANNEL)
-                file_er_id = str(forwarded_msg.id)
-                unique_str = f"{owner_uid}:{file_er_id}"
-                share_link = f"https://t.me/{bot_username}?start=file_{str_to_b64(unique_str)}"
+                code = await db.create_link(owner_uid, db_msg_id=forwarded_msg.id)
+
+            share_link = make_link(bot_username, code)
 
             await bot.edit_message_reply_markup(
                 message.chat.id,
                 message.id,
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("🔗 Get Shareable Link", url=share_link)]]
-                )
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔗 Get Shareable Link", url=share_link)],
+                    [InlineKeyboardButton("📤 Share", url=f"https://t.me/share/url?url={quote(share_link, safe='')}")],
+                ])
             )
 
         except Exception as err:
