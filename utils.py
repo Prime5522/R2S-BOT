@@ -3,10 +3,13 @@ from pyrogram.types import Message
 from base64 import standard_b64encode, standard_b64decode
 from typing import Any
 import random
+import re
 import string
 from datetime import datetime, timedelta, date, time
 import pytz
 import logging
+import time as _time
+import secrets
 
 from database import db
 from config import *
@@ -181,3 +184,111 @@ def sc(text: str) -> str:
                 result.append(ch)
         out_words.append(''.join(result))
     return ' '.join(out_words)
+
+
+# ================= ✨ NEW HELPERS ✨ =================
+_CODE_ALPHABET = string.ascii_letters + string.digits
+LINK_CODE_LENGTH = 22  # t.me start-param সীমা ৬৪ — verify লিংকেও এটা ঢুকে যায়
+
+
+def new_link_code(length: int = LINK_CODE_LENGTH) -> str:
+    """পরিষ্কার, প্যাডিং(=) ছাড়া র‍্যান্ডম লিংক কোড — যেমন: Xk3J9aBq2LmZp0TrYw7NcD"""
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(length))
+
+
+def looks_like_link_code(raw: str) -> bool:
+    return raw.isalnum() and len(raw) >= 16
+
+
+def parse_duration(text: str) -> int:
+    """'30s', '10m', '2h', '1d' বা শুধু সেকেন্ড সংখ্যা → সেকেন্ড। ভুল হলে ValueError।"""
+    arg = (text or "").strip().lower()
+    if not arg:
+        raise ValueError("empty")
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if arg[-1] in mult:
+        return int(arg[:-1].strip()) * mult[arg[-1]]
+    return int(arg)
+
+
+def format_duration(seconds) -> str:
+    """৩০০ → '5 minutes', ৫৪০০ → '1 hour 30 minutes'"""
+    seconds = int(seconds)
+    parts = []
+    for name, sec in (("day", 86400), ("hour", 3600), ("minute", 60), ("second", 1)):
+        if seconds >= sec:
+            v, seconds = divmod(seconds, sec)
+            parts.append(f"{v} {name}{'s' if v != 1 else ''}")
+    return " ".join(parts) or "0 seconds"
+
+
+def short_duration(seconds) -> str:
+    """৭৩০০ → '2h 1m' (ছোট আকারে, Status পপ-আপের জন্য)"""
+    seconds = int(seconds)
+    d, r = divmod(seconds, 86400)
+    h, r = divmod(r, 3600)
+    m, s = divmod(r, 60)
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _admin_ids() -> list:
+    return list(ADMINS) if isinstance(ADMINS, (list, tuple, set)) else [ADMINS]
+
+
+def active_moderators_of(client) -> list:
+    now = _time.time()
+    return [m for m in (getattr(client, "moderators", None) or []) if m.get("expires_at", 0) > now]
+
+
+def is_bot_staff(client, user_id: int) -> bool:
+    """
+    মূল বট: ADMINS।
+    ক্লোন বট: ক্লোনের ওনার + এখনো মেয়াদ আছে এমন মডারেটর।
+    """
+    user_id = int(user_id)
+    if getattr(client, "is_clone", False):
+        if user_id == int(getattr(client, "owner_id", 0) or 0):
+            return True
+        return any(int(m["user_id"]) == user_id for m in active_moderators_of(client))
+    return user_id in _admin_ids()
+
+
+async def resolve_user_ref(client, message):
+    """
+    মেসেজ থেকে ইউজার বের করে: ফরোয়ার্ড করা মেসেজ / সংখ্যার ID / @username।
+    রিটার্ন: dict(id, name, mention, is_bot) অথবা None।
+    """
+    fwd = getattr(message, "forward_from", None)
+    if not fwd and getattr(message, "forward_origin", None):
+        fwd = getattr(message.forward_origin, "sender_user", None)
+    if fwd:
+        return {"id": fwd.id, "name": fwd.first_name or str(fwd.id), "mention": fwd.mention, "is_bot": bool(fwd.is_bot)}
+
+    # ফরোয়ার্ড করা মেসেজ কিন্তু প্রেরকের আইডি লুকানো — টেক্সট থেকে ইউজার অনুমান করা হবে না
+    if getattr(message, "forward_date", None) or getattr(message, "forward_origin", None):
+        return None
+
+    text = (message.text or "").strip()
+    if not text:
+        return None
+    token = text.split()[0]
+    ref = None
+    if token.lstrip("-").isdigit():
+        ref = int(token)
+    elif re.fullmatch(r"@[A-Za-z][A-Za-z0-9_]{4,31}", token):
+        ref = token
+    if ref is None:
+        return None
+    try:
+        u = await client.get_users(ref)
+        return {"id": u.id, "name": u.first_name or str(u.id), "mention": u.mention, "is_bot": bool(u.is_bot)}
+    except Exception:
+        if isinstance(ref, int):
+            return {"id": ref, "name": str(ref), "mention": f"<code>{ref}</code>", "is_bot": False}
+        return None
