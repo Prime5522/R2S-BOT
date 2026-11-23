@@ -1,10 +1,20 @@
 import secrets
+import string
+import time
 from motor.motor_asyncio import AsyncIOMotorClient
-from config import DB_URL, DB_NAME, AUTH_CHANNELS, VERIFY_EXPIRE, HOW_TO_VERIFY, VERIFY, VERIFIED_LOG, CLONE_DB_URL
+from pymongo.errors import DuplicateKeyError
+from config import DB_URL, DB_NAME, AUTH_CHANNELS, VERIFY_EXPIRE, HOW_TO_VERIFY, VERIFY, VERIFIED_LOG, CLONE_DB_URL, DEFAULT_AUTO_DELETE_TIME
 import httpx
 
 client = AsyncIOMotorClient(DB_URL)
 mydb = client[DB_NAME]
+
+_CODE_ALPHABET = string.ascii_letters + string.digits
+_CODE_LEN = 22
+
+
+def _new_code() -> str:
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LEN))
 
 
 class Database:
@@ -12,6 +22,7 @@ class Database:
         active_db = custom_db if custom_db is not None else mydb
         self.users = active_db.users
         self.files = active_db.files
+        self.banned = active_db.banned
 
     def new_user(self, user_id, name):
         return {
@@ -33,6 +44,11 @@ class Database:
             "how_to_download": None,
             "verify": False,
             "permanent_link_mode": False,
+            "auto_delete": True,
+            "auto_delete_time": DEFAULT_AUTO_DELETE_TIME,
+            "auto_delete_msg": None,
+            "batch_mode": False,
+            "batch_status_id": None,
             "media_list": [],
             "confirm_msgs": [],
             "user_files": []
@@ -55,18 +71,58 @@ class Database:
     async def delete_user(self, user_id):
         await self.users.delete_many({'user_id': int(user_id)})
 
-    # Clone file storage
+    # ================= ✨ Link storage (clean short codes) ✨ =================
+    async def create_link(self, owner_uid: int, items: list = None, db_msg_id: int = None) -> str:
+        """
+        ছোট, পরিষ্কার কোড (যেমন Xk3J9aBq2LmZp0TrYw7NcD) বানিয়ে ডাটাবেসে সেভ করে।
+        - ক্লোন বট: items = [ফাইলের তথ্য...]
+        - মূল বট: db_msg_id = DB_CHANNEL-এর মেসেজ আইডি
+        """
+        for _ in range(6):
+            code = _new_code()
+            try:
+                await self.files.insert_one({
+                    "_id": code,
+                    "owner_uid": int(owner_uid),
+                    "items": items,
+                    "db_msg_id": db_msg_id,
+                    "created": int(time.time()),
+                })
+                return code
+            except DuplicateKeyError:
+                continue
+        raise RuntimeError("Could not generate a unique link code")
+
+    async def get_link(self, code: str):
+        return await self.files.find_one({"_id": code})
+
+    # পুরনো লিংকের জন্য (c_xxxxx আইডি) — আগের মতোই কাজ করবে
     async def save_clone_file(self, owner_uid: int, items: list) -> str:
-        code = f"c_{secrets.token_hex(5)}"
-        await self.files.insert_one({
-            "_id": code,
-            "owner_uid": int(owner_uid),
-            "items": items,
-        })
-        return code
+        return await self.create_link(owner_uid, items=items)
 
     async def get_clone_file(self, stored_id: str):
         return await self.files.find_one({"_id": stored_id})
+
+    # ================= ✨ Ban system ✨ =================
+    async def ban_user(self, user_id: int, reason: str = None, by: int = None):
+        await self.banned.update_one(
+            {"user_id": int(user_id)},
+            {"$set": {"user_id": int(user_id), "reason": reason, "by": by, "at": int(time.time())}},
+            upsert=True,
+        )
+
+    async def unban_user(self, user_id: int) -> bool:
+        res = await self.banned.delete_one({"user_id": int(user_id)})
+        return res.deleted_count > 0
+
+    async def is_banned(self, user_id: int) -> bool:
+        return bool(await self.banned.find_one({"user_id": int(user_id)}))
+
+    async def get_banned(self) -> list:
+        return await self.banned.find({}).to_list(length=None)
+
+    async def banned_count(self) -> int:
+        return await self.banned.count_documents({})
 
     # Verification
     async def update_verification(self, user_id, date, time):
