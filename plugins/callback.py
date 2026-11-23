@@ -6,8 +6,10 @@ from config import *
 from utils import get_hash
 from Script import script
 from plugins.save_media import save_batch_media_in_channel, save_media_in_channel
-from database.clonedb import clone_db
-from utils import sc
+from database.clonedb import clone_db, has_clone_access
+from utils import sc, format_duration
+from plugins.send_file import DEFAULT_AUTODELETE_MSG, MIN_AUTODELETE_SECONDS, MAX_AUTODELETE_SECONDS, get_autodelete_config
+import html as _html
 from plugins.clone import (
     build_start_content,
     handle_clone_callback,
@@ -74,6 +76,36 @@ async def edit_caption_or_text(query: CallbackQuery, text: str, reply_markup: In
         parse_mode=enums.ParseMode.HTML,
         disable_web_page_preview=True,
     )
+
+
+async def build_autodelete_panel(cur_db, target_uid: int, clone_bot_id: int = None):
+    sfx = build_suffix(target_uid, clone_bot_id)
+    back_cb = build_back_cb(target_uid, clone_bot_id)
+    settings = await cur_db.get_user(target_uid)
+    enabled, seconds, template = get_autodelete_config(settings)
+    custom = bool(settings.get("auto_delete_msg"))
+
+    text = (
+        "<b>⏱ Auto Delete Settings</b>\n\n"
+        "Files delivered to users are deleted automatically after the time you set.\n\n"
+        f"<b>Status:</b> {'ON ✅' if enabled else 'OFF ❌'}\n"
+        f"<b>Time:</b> <code>{format_duration(seconds)}</code>\n"
+        f"<b>Message:</b> {'Custom ✏️' if custom else 'Default'}\n\n"
+        "<b>Current warning message:</b>\n"
+        f"<blockquote>{_html.escape(template.replace('{time}', format_duration(seconds))) if custom else 'Default (shows the delete time)'}</blockquote>"
+    )
+    buttons = [
+        [InlineKeyboardButton(
+            f"Turn {'OFF ❌' if enabled else 'ON ✅'}",
+            callback_data=f"toggle_autodelete#{target_uid}#{enabled}" + (f"#{clone_bot_id}" if clone_bot_id else ""),
+        )],
+        [InlineKeyboardButton("⏱ Change Time", callback_data=f"set_autodelete_time#{sfx}")],
+        [InlineKeyboardButton("✏️ Update Message", callback_data=f"set_autodelete_msg#{sfx}")],
+    ]
+    if custom:
+        buttons.append([InlineKeyboardButton("♻️ Default Message", callback_data=f"default_autodelete_msg#{sfx}")])
+    buttons.append([InlineKeyboardButton("« Back", callback_data=back_cb)])
+    return text, InlineKeyboardMarkup(buttons)
 
 
 @Client.on_callback_query()
@@ -192,8 +224,8 @@ async def cb_handler(client: Client, query: CallbackQuery):
             else:
                 help_text = (
                     "<b>📖 How to Use This Bot</b>\n\n"
-                    "• Send any document, video, photo, or audio file to store it and get a shareable link.\n"
-                    "• Use <b>Save in Batch</b> to combine multiple files into a single link.\n"
+                    "• Send any document, video, photo, or audio file to get a direct shareable link instantly.\n"
+                    "• Send /batch, then your files, then /done to combine multiple files into a single link.\n"
                     "• Bot owner can use the \"Create My Own Clone\" panel on the main bot to customize this screen, caption, shortener, verification, and Force Subscribe.\n"
                 )
             return await edit_caption_or_text(query, help_text, reply_markup)
@@ -247,41 +279,6 @@ async def cb_handler(client: Client, query: CallbackQuery):
             ])
         )
         await cur_db.add_confirm_msg(user_id, confirm.id)
-        return
-
-    elif query.data == "getBatchLink":
-        cur_db = await resolve_target_db(client)
-        message_ids = await cur_db.get_media(user_id)
-        if not message_ids:
-            return await query.answer("⚠️ Batch list is empty!", show_alert=True)
-        editable = await client.send_message(
-            chat_id=query.message.chat.id,
-            text="⏳ Please wait, generating batch link..."
-        )
-        await save_batch_media_in_channel(
-            bot=client,
-            editable=editable,
-            message_ids=message_ids,
-            owner_uid=user_id
-        )
-        await cur_db.clear_media(user_id)
-
-        async def delete_later():
-            await asyncio.sleep(30)
-            for msg_id in await cur_db.get_confirm_msgs(user_id):
-                try:
-                    await client.delete_messages(chat_id=query.message.chat.id, message_ids=msg_id)
-                except Exception:
-                    pass
-            await cur_db.clear_confirm_msgs(user_id)
-            for msg_id in await cur_db.get_user_files(user_id):
-                try:
-                    await client.delete_messages(chat_id=query.message.chat.id, message_ids=msg_id)
-                except Exception:
-                    pass
-            await cur_db.clear_user_files(user_id)
-
-        asyncio.create_task(delete_later())
         return
 
     elif query.data == "addToBatchFalse":
@@ -342,7 +339,8 @@ async def cb_handler(client: Client, query: CallbackQuery):
             f"<b>🛡 Protect Content:</b> {protect_content}\n"
             f"<b>📢 F-Sub Channels:</b> {', '.join([str(ch) for ch in fsub_channels]) if fsub_channels else 'Not Set'}\n"
             f"<b>📜 Log Channel:</b> <code>{log_channel}</code>\n"
-            f"<b>📝 Caption:</b> <code>{custom_caption}</code>"
+            f"<b>📝 Caption:</b> <code>{custom_caption}</code>\n"
+            f"<b>⏱ Auto Delete:</b> {(format_duration(user.get('auto_delete_time') or 300)) if user.get('auto_delete', True) else '❌ Disabled'}"
         )
         btn = [
             [InlineKeyboardButton("♻️ Reset Settings", callback_data=f"user_reset#{sfx}")],
@@ -554,7 +552,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await clear_pending_input(client, user_id)
         cur_db = await resolve_target_db(client, clone_bot_id)
         sfx = build_suffix(target_uid, clone_bot_id)
-        back_cb = build_back_cb(target_uid, clone_bot_id)
+        back_cb = f"shortlink_setgs#{sfx}"
         settings = await cur_db.get_user(target_uid)
         btn = [
             [
@@ -642,7 +640,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await clear_pending_input(client, user_id)
         cur_db = await resolve_target_db(client, clone_bot_id)
         sfx = build_suffix(target_uid, clone_bot_id)
-        back_cb = build_back_cb(target_uid, clone_bot_id)
+        back_cb = f"shortlink_setgs#{sfx}"
         settings = await cur_db.get_user(target_uid)
         verify = bool(settings.get('verify', False))
         btn = [
@@ -686,7 +684,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
         target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
         cur_db = await resolve_target_db(client, clone_bot_id)
         sfx = build_suffix(target_uid, clone_bot_id)
-        back_cb = build_back_cb(target_uid, clone_bot_id)
+        back_cb = f"shortlink_setgs#{sfx}"
         settings = await cur_db.get_user(target_uid)
 
         if status == 'False':
@@ -734,6 +732,11 @@ async def cb_handler(client: Client, query: CallbackQuery):
             [
                 InlineKeyboardButton('Set Shortlink', callback_data=f'set_shortlink#{sfx}'),
                 InlineKeyboardButton('Delete Shortlink', callback_data=f'shortlink_delete#{sfx}')
+            ],
+            # ✨ Verification ও Tutorial এখন Shortener-এর ভিতরে
+            [
+                InlineKeyboardButton('✅ Verify Settings', callback_data=f'verify_setgs#{sfx}'),
+                InlineKeyboardButton('🎬 Tutorial', callback_data=f'tutorial_setgs#{sfx}')
             ],
             [InlineKeyboardButton('« Back', callback_data=back_cb)]
         ]
@@ -823,6 +826,68 @@ async def cb_handler(client: Client, query: CallbackQuery):
             InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
         )
 
+    # ================= ✨ AUTO DELETE ✨ =================
+    elif query.data.startswith("autodelete_setgs"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        text, markup = await build_autodelete_panel(cur_db, target_uid, clone_bot_id)
+        await send_or_edit_text(query, text, markup)
+
+    elif query.data.startswith("toggle_autodelete"):
+        target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        new_val = False if status == 'True' else True
+        await cur_db.update_user_info(target_uid, {"auto_delete": new_val})
+        text, markup = await build_autodelete_panel(cur_db, target_uid, clone_bot_id)
+        await send_or_edit_text(query, text, markup)
+        await query.answer(f"⏱ Auto Delete is now {'ON' if new_val else 'OFF'}")
+
+    elif query.data.startswith("set_autodelete_time"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"autodelete_setgs#{sfx}"
+        await set_pending_input(
+            client, user_id, action="set_autodelete_time", back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "<b>⏱ Send the Auto Delete time:</b>\n\n"
+            "<code>30s</code> → 30 seconds\n"
+            "<code>10m</code> → 10 minutes\n"
+            "<code>2h</code> → 2 hours\n\n"
+            f"Allowed: {format_duration(MIN_AUTODELETE_SECONDS)} – {format_duration(MAX_AUTODELETE_SECONDS)}\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("set_autodelete_msg"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = f"autodelete_setgs#{sfx}"
+        await set_pending_input(
+            client, user_id, action="set_autodelete_msg", back_cb=back_cb,
+            data={"target_uid": target_uid, "clone_bot_id": clone_bot_id},
+        )
+        await send_or_edit_text(
+            query,
+            "<b>✏️ Send your new Auto Delete message</b>\n\n"
+            "This warning is sent to the user right after the file(s). HTML formatting is supported.\n"
+            "Use <code>{time}</code> where the delete time should appear (e.g. <i>5 minutes</i>).\n\n"
+            "<b>Example:</b>\n<code>⚠️ Files will be deleted in {time}. Save them now!</code>\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=back_cb)]]),
+        )
+
+    elif query.data.startswith("default_autodelete_msg"):
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        cur_db = await resolve_target_db(client, clone_bot_id)
+        await cur_db.update_user_info(target_uid, {"auto_delete_msg": None})
+        await query.answer("♻️ Message reset to default")
+        text, markup = await build_autodelete_panel(cur_db, target_uid, clone_bot_id)
+        await send_or_edit_text(query, text, markup)
+
     elif query.data.startswith("settings"):
         target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
         await clear_pending_input(client, user_id)
@@ -831,16 +896,16 @@ async def cb_handler(client: Client, query: CallbackQuery):
         title = "<b>⚙️ Settings Menu</b>"
         if clone_bot_id:
             clone_doc = await clone_db.get_clone(clone_bot_id)
-            if not clone_doc or int(clone_doc["owner_id"]) != int(user_id):
+            if not clone_doc or not has_clone_access(clone_doc, user_id):
                 return await query.answer("⚠️ Access denied!", show_alert=True)
             title = f"<b>⚙️ Clone Bot Settings (@{clone_doc.get('bot_username')})</b>"
 
+        # ✨ Verify Settings ও Tutorial এখন "Set Shortener"-এর ভিতরে
         buttons = [
             [InlineKeyboardButton("📝 Caption Settings", callback_data=f"caption_setgs#{sfx}")],
             [InlineKeyboardButton("🔗 Set Shortener", callback_data=f"shortlink_setgs#{sfx}")],
-            [InlineKeyboardButton("✅ Verify Settings", callback_data=f"verify_setgs#{sfx}")],
             [InlineKeyboardButton("🔗 Permanent Link", callback_data=f"permanent_link_setgs#{sfx}")],
-            [InlineKeyboardButton("🎬 Tutorial Settings", callback_data=f"tutorial_setgs#{sfx}")],
+            [InlineKeyboardButton("⏱ Auto Delete", callback_data=f"autodelete_setgs#{sfx}")],
             [InlineKeyboardButton("🛡 Protect Settings", callback_data=f"update_protect_mode#{sfx}")],
             [InlineKeyboardButton("📢 Force Subscribe", callback_data=f"force_channel_setgs#{sfx}")],
             [InlineKeyboardButton("📢 Log Channel", callback_data=f"log_channel_setgs#{sfx}")],
