@@ -1,4 +1,5 @@
 from pyrogram import Client
+from pyrogram.errors import InternalServerError
 from config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, PORT, ADMINS
 from aiohttp import web
 from route import web_server
@@ -23,7 +24,17 @@ class Bot(Client):
         )
 
     async def start(self):
-        await super().start()
+        # ✨ টেলিগ্রামের সার্ভারে সাময়িক সমস্যা (500 RPC_CALL_FAIL) হলে বট ক্র্যাশ না করে
+        # নিজে থেকে আবার চেষ্টা করবে (সর্বোচ্চ ১০ বার, প্রতিবার ২০ সেকেন্ড অপেক্ষা)
+        for attempt in range(1, 11):
+            try:
+                await super().start()
+                break
+            except InternalServerError as e:
+                if attempt == 10:
+                    raise
+                print(f"⚠️ Telegram internal error ({e.__class__.__name__}), retry {attempt}/10 in 20s...")
+                await asyncio.sleep(20)
         me = await self.get_me()
         self.bot_id = me.id
         self.first_name = me.first_name
