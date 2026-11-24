@@ -10,26 +10,39 @@ from pyrogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeCh
 
 logger = logging.getLogger(__name__)
 
-PUBLIC = [
+# ✨ সব কমান্ড সবার মেনুতে দেখানো হয়। অ্যাডমিন-কমান্ড সাধারণ ইউজার দিলে সুন্দর
+# "Access Denied" ওয়ার্নিং পায় (plugins/moderation.py দেখুন)।
+CLONE_COMMANDS = [
     ("start", "sᴛᴀʀᴛ ᴛʜᴇ ʙᴏᴛ 🚀"),
-    ("batch", "ᴜᴘʟᴏᴀᴅ ᴍᴜʟᴛɪᴘʟᴇ ғɪʟᴇs ᴀs ᴏɴᴇ ʙᴀᴛᴄʜ ʟɪɴᴋ 📦"),
-    ("done", "ғɪɴɪsʜ ʙᴀᴛᴄʜ & ɢᴇᴛ ʟɪɴᴋ 🔗"),
     ("clone", "ᴄʀᴇᴀᴛᴇ ʏᴏᴜʀ ᴏᴡɴ ᴄʟᴏɴᴇ ʙᴏᴛ 🤖"),
+    ("batch", "ᴜᴘʟᴏᴀᴅ ᴍᴀɴʏ ғɪʟᴇs ᴀs ᴏɴᴇ ʙᴀᴛᴄʜ ʟɪɴᴋ 📦"),
+    ("done", "ғɪɴɪsʜ ʙᴀᴛᴄʜ & ɢᴇᴛ ᴛʜᴇ ʟɪɴᴋ 🔗"),
+    ("settings", "ᴏᴘᴇɴ sᴇᴛᴛɪɴɢs ᴘᴀɴᴇʟ (ᴏᴡɴᴇʀ) ⚙️"),
+    ("broadcast", "ʙʀᴏᴀᴅᴄᴀsᴛ ᴀ ᴍᴇssᴀɢᴇ (ᴏᴡɴᴇʀ) 📢"),
+    ("pin_broadcast", "ʙʀᴏᴀᴅᴄᴀsᴛ & ᴘɪɴ (ᴏᴡɴᴇʀ) 📌"),
+    ("ban", "ʙᴀɴ ᴀ ᴜsᴇʀ (ᴏᴡɴᴇʀ) 🚫"),
+    ("unban", "ᴜɴʙᴀɴ ᴀ ᴜsᴇʀ (ᴏᴡɴᴇʀ) ✅"),
+    ("banlist", "sʜᴏᴡ ʙᴀɴɴᴇᴅ ᴜsᴇʀs (ᴏᴡɴᴇʀ) 📋"),
 ]
 
-STAFF = PUBLIC + [
-    ("settings", "ᴏᴘᴇɴ sᴇᴛᴛɪɴɢs ᴘᴀɴᴇʟ ⚙️"),
-    ("broadcast", "ʙʀᴏᴀᴅᴄᴀsᴛ ᴀ ᴍᴇssᴀɢᴇ 📢"),
-    ("pin_broadcast", "ʙʀᴏᴀᴅᴄᴀsᴛ & ᴘɪɴ ᴍᴇssᴀɢᴇ 📌"),
-    ("ban", "ʙᴀɴ ᴀ ᴜsᴇʀ 🚫"),
-    ("unban", "ᴜɴʙᴀɴ ᴀ ᴜsᴇʀ ✅"),
-    ("banlist", "ᴠɪᴇᴡ ʙᴀɴɴᴇᴅ ᴜsᴇʀs 📋"),
+MAIN_COMMANDS = [
+    ("start", "sᴛᴀʀᴛ ᴛʜᴇ ʙᴏᴛ 🚀"),
+    ("clone", "ᴄʀᴇᴀᴛᴇ ʏᴏᴜʀ ᴏᴡɴ ᴄʟᴏɴᴇ ʙᴏᴛ 🤖"),
+    ("settings", "ᴏᴘᴇɴ ʏᴏᴜʀ sᴇᴛᴛɪɴɢs ⚙️"),
+    ("batch", "ᴜᴘʟᴏᴀᴅ ᴍᴀɴʏ ғɪʟᴇs ᴀs ᴏɴᴇ ʙᴀᴛᴄʜ ʟɪɴᴋ 📦"),
+    ("done", "ғɪɴɪsʜ ʙᴀᴛᴄʜ & ɢᴇᴛ ᴛʜᴇ ʟɪɴᴋ 🔗"),
+    ("broadcast", "ʙʀᴏᴀᴅᴄᴀsᴛ ᴀ ᴍᴇssᴀɢᴇ (ᴀᴅᴍɪɴ) 📢"),
+    ("pin_broadcast", "ʙʀᴏᴀᴅᴄᴀsᴛ & ᴘɪɴ (ᴀᴅᴍɪɴ) 📌"),
+    ("ban", "ʙᴀɴ ᴀ ᴜsᴇʀ (ᴀᴅᴍɪɴ) 🚫"),
+    ("unban", "ᴜɴʙᴀɴ ᴀ ᴜsᴇʀ (ᴀᴅᴍɪɴ) ✅"),
+    ("banlist", "sʜᴏᴡ ʙᴀɴɴᴇᴅ ᴜsᴇʀs (ᴀᴅᴍɪɴ) 📋"),
+    ("stats", "ʙᴏᴛ sᴛᴀᴛɪsᴛɪᴄs (ᴀᴅᴍɪɴ) 📊"),
+    ("restart", "ʀᴇsᴛᴀʀᴛ ᴛʜᴇ ʙᴏᴛ (ᴀᴅᴍɪɴ) 🔄"),
 ]
 
-MAIN_ADMIN = STAFF + [
-    ("stats", "ᴠɪᴇᴡ ʙᴏᴛ sᴛᴀᴛɪsᴛɪᴄs 📊"),
-    ("restart", "ʀᴇsᴛᴀʀᴛ ᴛʜᴇ ʙᴏᴛ 🔄"),
-]
+
+def _commands_for(client):
+    return CLONE_COMMANDS if getattr(client, "is_clone", False) else MAIN_COMMANDS
 
 
 def _to_commands(items):
@@ -38,15 +51,14 @@ def _to_commands(items):
 
 async def set_public_commands(client):
     try:
-        await client.set_bot_commands(_to_commands(PUBLIC), scope=BotCommandScopeDefault())
+        await client.set_bot_commands(_to_commands(_commands_for(client)), scope=BotCommandScopeDefault())
     except Exception as e:
         logger.warning(f"set public commands failed: {e}")
 
 
 async def set_staff_commands(client, user_id: int):
-    items = STAFF if getattr(client, "is_clone", False) else MAIN_ADMIN
     try:
-        await client.set_bot_commands(_to_commands(items), scope=BotCommandScopeChat(chat_id=int(user_id)))
+        await client.set_bot_commands(_to_commands(_commands_for(client)), scope=BotCommandScopeChat(chat_id=int(user_id)))
         return True
     except Exception as e:
         # ইউজার এখনো বটে /start না দিলে টেলিগ্রাম এটা নেয় না — /start দিলে নিচের ensure_ দিয়ে আবার সেট হবে
