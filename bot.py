@@ -24,16 +24,24 @@ class Bot(Client):
         )
 
     async def start(self):
+        # ✨ ওয়েব সার্ভার সবার আগে চালু — Koyeb/Heroku-র হেলথ-চেক (পোর্ট ৮০৮০) যাতে
+        # টেলিগ্রামে লগইন হওয়ার আগেই পাস করে, নইলে প্ল্যাটফর্ম বারবার রিস্টার্ট দেয়।
+        app_instance = await web_server()
+        app_runner = web.AppRunner(app_instance)
+        await app_runner.setup()
+        site = web.TCPSite(app_runner, "0.0.0.0", int(PORT))
+        await site.start()
+
         # ✨ টেলিগ্রামের সার্ভারে সাময়িক সমস্যা (500 RPC_CALL_FAIL) হলে বট ক্র্যাশ না করে
-        # নিজে থেকে আবার চেষ্টা করবে (সর্বোচ্চ ১০ বার, প্রতিবার ২০ সেকেন্ড অপেক্ষা)
-        for attempt in range(1, 11):
+        # নিজে থেকে আবার চেষ্টা করবে (সর্বোচ্চ ৩০ বার, প্রতিবার ২০ সেকেন্ড অপেক্ষা)
+        for attempt in range(1, 31):
             try:
                 await super().start()
                 break
             except InternalServerError as e:
-                if attempt == 10:
+                if attempt == 30:
                     raise
-                print(f"⚠️ Telegram internal error ({e.__class__.__name__}), retry {attempt}/10 in 20s...")
+                print(f"⚠️ Telegram internal error ({e.__class__.__name__}), retry {attempt}/30 in 20s...")
                 await asyncio.sleep(20)
         me = await self.get_me()
         self.bot_id = me.id
@@ -50,12 +58,6 @@ class Bot(Client):
         today = date.today()
         now = datetime.now(tz)
         time = now.strftime("%H:%M:%S %p")
-
-        app_instance = await web_server()
-        app_runner = web.AppRunner(app_instance)
-        await app_runner.setup()
-        site = web.TCPSite(app_runner, "0.0.0.0", int(PORT))
-        await site.start()
 
         print(f"{me.first_name} STARTED ⚡️⚡️⚡️")
 
