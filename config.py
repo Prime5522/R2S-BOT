@@ -29,7 +29,7 @@ VERIFY_IMG = environ.get("VERIFY_IMG", "https://graph.org/file/1669ab9af68eaa62c
 WEBSITE_URL_MODE = bool(environ.get('WEBSITE_URL_MODE', True)) # Set True or False
 
 # If Website Url Mode Is True Then Fill All Required Variable, If False Then Don't Fill.
-WEBSITE_URL = environ.get("WEBSITE_URL", "https://filestoreprimebot.vercel.app") 
+WEBSITE_URL = environ.get("WEBSITE_URL", "") 
 
 # ================= ✨ CLONE MODE SETTINGS ✨ =================
 # মূল বটের ইউজারনেম (@ ছাড়া) — ক্লোন বট থেকে "Create My Own Clone" বাটনে
