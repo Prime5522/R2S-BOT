@@ -119,9 +119,14 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await query.message.delete()
 
     elif query.data == "about":
+        # ✨ About পেজে Close-এর জায়গায় Source Code বাটন (লিংক config-এর CLONE_SOURCE_CODE_URL)
+        if CLONE_SOURCE_CODE_URL:
+            second_btn = InlineKeyboardButton('✧ Sᴏᴜʀᴄᴇ Cᴏᴅᴇ ✧', url=CLONE_SOURCE_CODE_URL)
+        else:
+            second_btn = InlineKeyboardButton(sc('• Close •'), callback_data='close_data')
         buttons = [[
             InlineKeyboardButton(sc('• Home •'), callback_data='start'),
-            InlineKeyboardButton(sc('• Close •'), callback_data='close_data')
+            second_btn
         ]]
         reply_markup = InlineKeyboardMarkup(buttons)
 
