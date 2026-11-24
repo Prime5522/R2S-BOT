@@ -722,21 +722,39 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await send_or_edit_text(query, "🗑 Successfully deleted verification settings.", InlineKeyboardMarkup(btn))
 
     elif query.data.startswith("shortlink_setgs"):
+        # ✨ Shortener মেনু: ভিতরে দুটো বাটন — Link Shortener ও Token Verification
+        target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
+        await clear_pending_input(client, user_id)
+        sfx = build_suffix(target_uid, clone_bot_id)
+        back_cb = build_back_cb(target_uid, clone_bot_id)
+        btn = [
+            [
+                InlineKeyboardButton('🔗 Link Shortener', callback_data=f'linkshort_setgs#{sfx}'),
+                InlineKeyboardButton('✅ Token Verification', callback_data=f'verify_setgs#{sfx}'),
+            ],
+            [InlineKeyboardButton('🎬  T U T O R I A L  🎬', callback_data=f'tutorial_setgs#{sfx}')],
+            [InlineKeyboardButton('« Back', callback_data=back_cb)]
+        ]
+        await send_or_edit_text(
+            query,
+            "<b>🔗 Shortener</b>\n\nChoose what you want to configure:\n\n"
+            "• <b>Link Shortener</b> — shorten your file links\n"
+            "• <b>Token Verification</b> — make users verify before getting files\n"
+            "• <b>Tutorial</b> — set the \"how to verify\" video/link",
+            InlineKeyboardMarkup(btn),
+        )
+
+    elif query.data.startswith("linkshort_setgs"):
         target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
         await clear_pending_input(client, user_id)
         cur_db = await resolve_target_db(client, clone_bot_id)
         sfx = build_suffix(target_uid, clone_bot_id)
-        back_cb = build_back_cb(target_uid, clone_bot_id)
+        back_cb = f"shortlink_setgs#{sfx}"
         settings = await cur_db.get_user(target_uid)
         btn = [
             [
                 InlineKeyboardButton('Set Shortlink', callback_data=f'set_shortlink#{sfx}'),
                 InlineKeyboardButton('Delete Shortlink', callback_data=f'shortlink_delete#{sfx}')
-            ],
-            # ✨ Verification ও Tutorial এখন Shortener-এর ভিতরে
-            [
-                InlineKeyboardButton('✅ Verify Settings', callback_data=f'verify_setgs#{sfx}'),
-                InlineKeyboardButton('🎬 Tutorial', callback_data=f'tutorial_setgs#{sfx}')
             ],
             [InlineKeyboardButton('« Back', callback_data=back_cb)]
         ]
@@ -746,14 +764,14 @@ async def cb_handler(client: Client, query: CallbackQuery):
             api_url = f"URL: <code>{settings['base_site']}</code>\nAPI: <code>{settings['shortener_api']}</code>"
         await send_or_edit_text(
             query,
-            f"<b>🔗 Shortener Settings</b>\n\n{api_url}",
+            f"<b>🔗 Link Shortener Settings</b>\n\n{api_url}",
             InlineKeyboardMarkup(btn),
         )
 
     elif query.data.startswith("set_shortlink"):
         target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
         sfx = build_suffix(target_uid, clone_bot_id)
-        back_cb = f"shortlink_setgs#{sfx}"
+        back_cb = f"linkshort_setgs#{sfx}"
         await set_pending_input(
             client,
             user_id,
@@ -771,7 +789,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
         target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
         cur_db = await resolve_target_db(client, clone_bot_id)
         sfx = build_suffix(target_uid, clone_bot_id)
-        btn = [[InlineKeyboardButton('« Back', callback_data=f'shortlink_setgs#{sfx}')]]
+        btn = [[InlineKeyboardButton('« Back', callback_data=f'linkshort_setgs#{sfx}')]]
         settings = await cur_db.get_user(target_uid)
         if not settings.get('shortener_api'):
             return await query.answer("⚠️ No shortlink is configured.", show_alert=True)
