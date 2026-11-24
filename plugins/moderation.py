@@ -8,8 +8,10 @@ from types import SimpleNamespace
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 from database import get_db
-from utils import is_bot_staff, resolve_user_ref
+from utils import is_bot_staff, resolve_user_ref, _admin_ids
 
 BAN_TEXT = "🚫 <b>You are banned from using this bot.</b>"
 
@@ -127,4 +129,49 @@ async def banlist_command(client: Client, message: Message):
         chunk += line + "\n"
     if chunk.strip():
         await message.reply_text(chunk)
-      
+
+
+# ---------------------- ✨ Access Denied warning ✨ ---------------------- #
+ADMIN_ONLY_COMMANDS = ["broadcast", "pin_broadcast", "ban", "unban", "banlist", "stats", "restart"]
+
+
+async def _is_denied(_, client, message):
+    """অ্যাডমিন-কমান্ড কিন্তু ইউজার ওনার/মডারেটর/অ্যাডমিন নয় → true"""
+    if not message.from_user or not message.command:
+        return False
+    uid = message.from_user.id
+    if is_bot_staff(client, uid):
+        return False
+    cmd = message.command[0].lower().split("@")[0]
+    is_clone = getattr(client, "is_clone", False)
+    if cmd in ("stats", "restart") and uid in _admin_ids():
+        return False  # মূল বটের অ্যাডমিন — তার নিজের হ্যান্ডলার চলবে
+    if cmd in ADMIN_ONLY_COMMANDS:
+        return True
+    if cmd == "settings" and is_clone:
+        return True
+    return False
+
+denied_filter = filters.create(_is_denied)
+
+
+@Client.on_message(
+    filters.command(ADMIN_ONLY_COMMANDS + ["settings"]) & filters.private & denied_filter
+)
+async def access_denied(client: Client, message: Message):
+    cmd = message.command[0].lower().split("@")[0]
+    who = "the <b>owner</b> or <b>moderators</b> of this bot" if getattr(client, "is_clone", False) else "the <b>bot admins</b>"
+    text = (
+        "🚫 <b>Access Denied</b>\n"
+        "━━━━━━━━━━━━━━━━━\n\n"
+        f"The command <code>/{cmd}</code> is a <b>restricted command</b>.\n"
+        f"Only {who} can use it.\n\n"
+        "━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>You can still send me any file to get a shareable link, or tap Home to continue.</i>"
+    )
+    await message.reply_text(
+        text,
+        quote=True,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="start")]]),
+        )
+    
