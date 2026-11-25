@@ -19,7 +19,7 @@ from Script import script
 from database import get_db, get_clone_database
 from database.clonedb import clone_db, has_clone_access, is_owner, active_moderators
 from clone_manager import start_clone, stop_clone, restart_clone, delete_clone, RUNNING_CLONES
-from utils import sc, format_duration, short_duration, resolve_user_ref, parse_duration
+from utils import sc, format_duration, short_duration, resolve_user_ref, parse_duration, mod_expiry_ts, mod_left_text, mod_is_permanent
 from bot_commands import set_staff_commands, clear_staff_commands
 from plugins.send_file import MIN_AUTODELETE_SECONDS, MAX_AUTODELETE_SECONDS
 
@@ -325,6 +325,13 @@ async def _finalize_clone_creation(client: Client, reply_target, user_id: int, t
     )
 
 
+# মডারেটরের সময়সীমা বর্ণনা (0 = স্থায়ী)
+if MODERATOR_DURATION_HOURS <= 0:
+    MOD_FOR_TXT = " — <b>with no time limit</b> (until you remove them)."
+else:
+    MOD_FOR_TXT = f" for <b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>, then it ends automatically."
+
+
 async def start_creation_flow(client: Client, target, is_callback: bool):
     user_id = target.from_user.id
     await clear_pending_input(client, user_id)
@@ -353,8 +360,8 @@ async def show_moderated_list(target, clones: list, is_callback: bool):
     uid = target.from_user.id
     for c in clones:
         mod = next((m for m in active_moderators(c) if int(m["user_id"]) == int(uid)), None)
-        left = format_duration(max(0, mod["expires_at"] - now)) if mod else "—"
-        text += f"\n• @{c.get('bot_username')} — ⏳ {left} left"
+        left = mod_left_text(mod["expires_at"]) if mod else "—"
+        text += f"\n• @{c.get('bot_username')} — ⏳ {left}"
         buttons.append([InlineKeyboardButton(sc(f"⚙️ Manage @{c.get('bot_username')}"), callback_data=f"manage_clone#{c['bot_id']}")])
     buttons.append([InlineKeyboardButton(f"✨ {CLONE_BTN_LABEL}", callback_data="clone_create_new")])
     buttons.append([InlineKeyboardButton("« Back", callback_data="start")])
@@ -427,7 +434,13 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
     if not viewer_is_owner:
         mod = next((m for m in active_moderators(clone_doc) if int(m["user_id"]) == viewer_id), None)
         if mod:
-            text += f"\n\n👮 <i>You are a temporary moderator — access ends in {format_duration(max(0, mod['expires_at'] - time.time()))}.</i>"
+            if mod_is_permanent(mod["expires_at"]):
+                text += "\n\n👮 <i>You are a moderator of this bot.</i>"
+            else:
+                text += (
+                "\n\n👮 <i>You are a moderator of this bot.</i>" if mod_is_permanent(mod["expires_at"])
+                else f"\n\n👮 <i>You are a temporary moderator — {mod_left_text(mod['expires_at'])}.</i>"
+            )
 
     sfx = f"{owner_id}#{bot_id}"
     buttons = [
@@ -524,14 +537,13 @@ async def show_mods_view(target, clone_doc: dict):
 
     text = (
         "<b>👮 Moderators</b>\n\n"
-        f"A moderator gets <b>full access</b> to manage this clone for <b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>, "
-        "then it ends automatically.\n"
+        f"A moderator gets <b>full access</b> to manage this clone{MOD_FOR_TXT}"
         "<i>(Only you can add/remove moderators, transfer or delete the clone.)</i>\n"
     )
     if mods:
         text += "\n<b>Active moderators:</b>\n"
         for m in mods:
-            text += f"• <a href='tg://user?id={m['user_id']}'>{m.get('name') or m['user_id']}</a> (<code>{m['user_id']}</code>) — ⏳ {format_duration(max(0, m['expires_at'] - now))} left\n"
+            text += f"• <a href='tg://user?id={m['user_id']}'>{m.get('name') or m['user_id']}</a> (<code>{m['user_id']}</code>) — ⏳ {mod_left_text(m['expires_at'])}\n"
     else:
         text += "\nNo active moderators."
 
@@ -1369,7 +1381,7 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             query,
             "<b>➕ Add Moderator</b>\n\n"
             "Send the user's <b>numeric ID</b>, their <b>@username</b>, or <b>forward any message</b> from them.\n\n"
-            f"They will get <b>full access</b> to this clone for <b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>.\n\n"
+            f"They will get <b>full access</b> to this clone{MOD_FOR_TXT}\n\n"
             "Send /cancel to cancel.",
             InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_mods#{bot_id}")]]),
         )
@@ -1784,7 +1796,7 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
             return
 
         PENDING_INPUTS.pop(state_key, None)
-        expires_at = time.time() + MODERATOR_DURATION_HOURS * 3600
+        expires_at = mod_expiry_ts(MODERATOR_DURATION_HOURS)
         await clone_db.add_moderator(target_bot_id, res["id"], expires_at, user_id, name=res["name"])
         running = await _refresh_running_mods(target_bot_id)
         if running:
@@ -1794,7 +1806,7 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
             await client.send_message(
                 res["id"],
                 f"👮 <b>You are now a moderator of @{clone_doc.get('bot_username')}!</b>\n\n"
-                f"You have full access for <b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>.\n"
+                f"You have full access{MOD_FOR_TXT}\n"
                 "Send /clone here to open its control panel, or use the staff commands inside that bot "
                 "(/broadcast, /ban, /unban, /banlist).",
             )
@@ -1802,8 +1814,8 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
             pass
 
         await message.reply_text(
-            f"✅ {res['mention']} (<code>{res['id']}</code>) is now a moderator for "
-            f"<b>{format_duration(MODERATOR_DURATION_HOURS * 3600)}</b>."
+            f"✅ {res['mention']} (<code>{res['id']}</code>) is now a moderator"
+            f"{' with <b>no time limit</b>.' if MODERATOR_DURATION_HOURS <= 0 else ' for <b>' + format_duration(MODERATOR_DURATION_HOURS * 3600) + '</b>.'}"
         )
         clone_doc = await clone_db.get_clone(target_bot_id)
         await show_mods_view(message, clone_doc)
