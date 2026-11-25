@@ -292,3 +292,22 @@ async def resolve_user_ref(client, message):
         if isinstance(ref, int):
             return {"id": ref, "name": str(ref), "mention": f"<code>{ref}</code>", "is_bot": False}
         return None
+
+
+# ================= ✨ Moderator duration helpers ✨ =================
+PERMANENT_EXPIRY = 4102444800  # ০১-০১-২১০০ — "কোনো সময়সীমা নেই" বোঝাতে
+
+
+def mod_expiry_ts(hours: int) -> float:
+    """hours <= 0 হলে স্থায়ী মডারেটর"""
+    return float(PERMANENT_EXPIRY) if hours <= 0 else _time.time() + hours * 3600
+
+
+def mod_is_permanent(expires_at: float) -> bool:
+    return expires_at >= PERMANENT_EXPIRY - 1
+
+
+def mod_left_text(expires_at: float) -> str:
+    if mod_is_permanent(expires_at):
+        return "♾ Permanent"
+    return f"{format_duration(max(0, expires_at - _time.time()))} left"
