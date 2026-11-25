@@ -1,6 +1,11 @@
 from pyrogram import Client
 from pyrogram.errors import InternalServerError
-from config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, PORT, ADMINS
+from config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL, PORT, ADMINS, DB_URL, DB_NAME
+from database import mydb
+from session_store import (
+    load_main_session_sync, save_main_session, clear_main_session,
+    reset_to_token_login, SESSION_DEAD_ERRORS,
+)
 from aiohttp import web
 from route import web_server
 from clone_manager import load_all_clones, moderator_cleanup_loop
@@ -12,11 +17,15 @@ from datetime import date, datetime
 
 class Bot(Client):
     def __init__(self):
+        # ✨ ডাটাবেসে সেভ করা সেশন থাকলে সেটা দিয়ে চালু — Telegram-এ নতুন লগইন কল লাগে না
+        saved_session = load_main_session_sync(DB_URL, DB_NAME, BOT_TOKEN, API_ID)
+        self._used_saved_session = bool(saved_session)
         super().__init__(
             name="avbotz",
             api_id=API_ID,
             api_hash=API_HASH,
             bot_token=BOT_TOKEN,
+            session_string=saved_session,
             workers=200,
             plugins={"root": "plugins"},
             sleep_threshold=15,
@@ -38,11 +47,27 @@ class Bot(Client):
             try:
                 await super().start()
                 break
+            except SESSION_DEAD_ERRORS as e:
+                # সেভ করা সেশন অচল (যেমন একই সময়ে দুই জায়গায় চালু) → মুছে টোকেন দিয়ে নতুন লগইন
+                if not self._used_saved_session:
+                    raise
+                print(f"⚠️ Saved session is dead ({e.__class__.__name__}) — logging in with bot token...")
+                await clear_main_session(mydb)
+                reset_to_token_login(self)
+                self._used_saved_session = False
             except InternalServerError as e:
                 if attempt == 30:
                     raise
                 print(f"⚠️ Telegram internal error ({e.__class__.__name__}), retry {attempt}/30 in 20s...")
                 await asyncio.sleep(20)
+        # ✨ নতুন লগইন হলে সেশন সেভ করে রাখা হয়
+        if not self._used_saved_session:
+            try:
+                await save_main_session(mydb, await self.export_session_string(), BOT_TOKEN, API_ID)
+                print("💾 Session saved to database")
+            except Exception as e:
+                print(f"⚠️ Could not save session: {e}")
+
         me = await self.get_me()
         self.bot_id = me.id
         self.first_name = me.first_name
