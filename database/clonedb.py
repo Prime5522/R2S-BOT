@@ -87,6 +87,20 @@ class CloneDB:
     async def update_clone_settings(self, bot_id: int, values: dict):
         await self.clones.update_one({"bot_id": int(bot_id)}, {"$set": values})
 
+    # ================= ✨ Saved sessions ✨ =================
+    async def get_clone_by_token(self, bot_token: str):
+        return await self.clones.find_one({"bot_token": bot_token})
+
+    async def save_session(self, bot_id: int, session: str, fp: str):
+        await self.clones.update_one(
+            {"bot_id": int(bot_id)}, {"$set": {"session_string": session, "session_fp": fp}}
+        )
+
+    async def clear_session(self, bot_id: int):
+        await self.clones.update_one(
+            {"bot_id": int(bot_id)}, {"$unset": {"session_string": "", "session_fp": ""}}
+        )
+
     # ================= ✨ Moderators ✨ =================
     async def get_moderated_clones(self, user_id: int) -> list:
         return await self.clones.find({
