@@ -29,7 +29,8 @@ VERIFY_IMG = environ.get("VERIFY_IMG", "https://graph.org/file/1669ab9af68eaa62c
 WEBSITE_URL_MODE = bool(environ.get('WEBSITE_URL_MODE', True)) # Set True or False
 
 # If Website Url Mode Is True Then Fill All Required Variable, If False Then Don't Fill.
-WEBSITE_URL = environ.get("WEBSITE_URL", "") 
+WEBSITE_URL = environ.get("WEBSITE_URL", "https://primexstore.pages.dev")
+WEBSITE_PARAM = environ.get("WEBSITE_PARAM", "PrimeXBots")  # ওয়েবসাইট পেজ যে প্যারামিটার নামে কোড পড়ে
 
 # ================= ✨ CLONE MODE SETTINGS ✨ =================
 # মূল বটের ইউজারনেম (@ ছাড়া) — ক্লোন বট থেকে "Create My Own Clone" বাটনে
@@ -62,8 +63,9 @@ CLONE_SOURCE_CODE_URL = environ.get("CLONE_SOURCE_CODE_URL", "https://t.me/Prime
 
 
 # ================= ✨ NEW FEATURE SETTINGS ✨ =================
-# মডারেটর কতক্ষণের জন্য সব ক্ষমতা পাবে (ঘণ্টায়) — ডিফল্ট ২৪ ঘণ্টা (একদিন)
-MODERATOR_DURATION_HOURS = int(environ.get("MODERATOR_DURATION_HOURS", "24"))
+# মডারেটর কতক্ষণের জন্য সব ক্ষমতা পাবে (ঘণ্টায়)।
+# 0 = কোনো সময়সীমা নেই (স্থায়ী — ওনার রিমুভ না করা পর্যন্ত থাকবে)। ২৪ দিলে একদিনের জন্য।
+MODERATOR_DURATION_HOURS = int(environ.get("MODERATOR_DURATION_HOURS", "0"))
 
 # Auto Delete-এর ডিফল্ট সময় (সেকেন্ডে) — ডিফল্ট ৫ মিনিট
 DEFAULT_AUTO_DELETE_TIME = int(environ.get("DEFAULT_AUTO_DELETE_TIME", "300"))
