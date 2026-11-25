@@ -2,7 +2,7 @@ import asyncio
 import traceback
 from urllib.parse import quote
 
-from config import DB_CHANNEL, LOG_CHANNEL, WEBSITE_URL
+from config import DB_CHANNEL, LOG_CHANNEL, WEBSITE_URL, WEBSITE_PARAM
 from pyrogram import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
@@ -64,9 +64,15 @@ def make_link(bot_username: str, code: str) -> str:
     return f"https://t.me/{bot_username}?start={code}"
 
 
-def legacy_permanent_link(owner_uid: int, db_msg_id: int) -> str:
-    # ওয়েবসাইট (Permanent Link) আগের ফরম্যাটেই কাজ করে — সেটা ভাঙা হয়নি
-    return f"{WEBSITE_URL}?AVBOTZ=file_{str_to_b64(f'{owner_uid}:{db_msg_id}')}"
+def permanent_link(code: str, clone_username: str = None) -> str:
+    """
+    https://primexstore.pages.dev/?PrimeXBots=<পরিষ্কার-কোড>
+    ক্লোন বটের লিংকে &bot=<ক্লোনের-ইউজারনেম> যোগ হয়, যাতে ওয়েবসাইট ঠিক ক্লোন বটেই পাঠায়।
+    """
+    link = f"{WEBSITE_URL.rstrip('/')}/?{WEBSITE_PARAM}={code}"
+    if clone_username:
+        link += f"&bot={clone_username}"
+    return link
 
 
 def build_share_buttons(is_clone: bool, share_link: str, short_link: str):
@@ -139,8 +145,8 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
             code = await cur_db.create_link(owner_uid, db_msg_id=db_msg_id)
 
         user = await cur_db.get_user(owner_uid)
-        if user.get("permanent_link_mode", False) and not is_clone:
-            share_link = legacy_permanent_link(owner_uid, db_msg_id)
+        if user.get("permanent_link_mode", False):
+            share_link = permanent_link(code, bot_username if is_clone else None)
         else:
             share_link = make_link(bot_username, code)
 
@@ -218,8 +224,8 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
             code = await cur_db.create_link(owner_uid, db_msg_id=db_msg_id)
 
         user = await cur_db.get_user(owner_uid)
-        if user.get("permanent_link_mode", False) and not is_clone:
-            share_link = legacy_permanent_link(owner_uid, db_msg_id)
+        if user.get("permanent_link_mode", False):
+            share_link = permanent_link(code, bot_username if is_clone else None)
         else:
             share_link = make_link(bot_username, code)
 
