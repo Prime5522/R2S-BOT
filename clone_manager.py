@@ -4,6 +4,7 @@ import time
 
 from pyrogram import Client
 from pyrogram.errors import RPCError
+from session_store import fingerprint, SESSION_DEAD_ERRORS
 
 from config import API_ID, API_HASH, BOT_TOKEN, MAX_CLONE_PER_USER
 from database import get_clone_database, drop_clone_database
@@ -20,19 +21,37 @@ async def start_clone(bot_token: str, owner_id: int, owner_mention: str = None):
         raise ValueError("You cannot clone the main bot itself! Please create a new bot in @BotFather.")
 
     temp_name = f"clone_{owner_id}_{int(time.time())}"
+    fp = fingerprint(bot_token, API_ID)
 
-    clone_client = Client(
-        name=temp_name,
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=bot_token,
-        plugins={"root": "plugins"},
-        workers=30,
-        sleep_threshold=15,
-        in_memory=True,
-    )
+    def make_client(session_string=None):
+        return Client(
+            name=temp_name,
+            api_id=API_ID,
+            api_hash=API_HASH,
+            bot_token=bot_token,
+            session_string=session_string,
+            plugins={"root": "plugins"},
+            workers=30,
+            sleep_threshold=15,
+            in_memory=True,
+        )
 
-    await clone_client.start()
+    # ✨ আগে সেভ করা সেশন থাকলে সেটা দিয়ে চালু — Telegram-এ নতুন লগইন কল লাগে না
+    saved = await clone_db.get_clone_by_token(bot_token)
+    saved_session = saved.get("session_string") if saved and saved.get("session_fp") == fp else None
+    used_saved = False
+
+    clone_client = make_client(saved_session)
+    try:
+        await clone_client.start()
+        used_saved = bool(saved_session)
+    except SESSION_DEAD_ERRORS:
+        if not saved_session:
+            raise
+        logger.warning(f"Saved session of clone {saved.get('bot_username')} is dead; logging in with token.")
+        await clone_db.clear_session(saved["bot_id"])
+        clone_client = make_client(None)
+        await clone_client.start()
     me = await clone_client.get_me()
     bot_id = me.id
 
@@ -76,6 +95,13 @@ async def start_clone(bot_token: str, owner_id: int, owner_mention: str = None):
         status="active",
         owner_mention=owner_mention,
     )
+
+    # ✨ নতুন লগইন হলে সেশন সেভ করে রাখা হয় (পরের রিস্টার্টে লগইন কল বাঁচে)
+    if not used_saved:
+        try:
+            await clone_db.save_session(bot_id, await clone_client.export_session_string(), fp)
+        except Exception as e:
+            logger.warning(f"Could not save session for @{me.username}: {e}")
 
     clone_client.is_clone = True
     clone_client.bot_id = bot_id
@@ -144,6 +170,7 @@ async def load_all_clones():
             await start_clone(c["bot_token"], c["owner_id"])
         except (RPCError, Exception) as e:
             logger.error(f"Failed to restore clone @{c.get('bot_username')}: {e}")
+        await asyncio.sleep(1)  # একসাথে সব ক্লোনের লগইন/কানেকশন ঝাঁপিয়ে না পড়তে
 
 
 async def moderator_cleanup_loop(interval: int = 600):
