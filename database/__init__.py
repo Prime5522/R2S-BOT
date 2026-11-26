@@ -72,7 +72,8 @@ class Database:
         await self.users.delete_many({'user_id': int(user_id)})
 
     # ================= ✨ Link storage (clean short codes) ✨ =================
-    async def create_link(self, owner_uid: int, items: list = None, db_msg_id: int = None) -> str:
+    async def create_link(self, owner_uid: int, items: list = None, db_msg_id: int = None,
+                          channel_id: int = None, msg_ids: list = None) -> str:
         """
         ছোট, পরিষ্কার কোড (যেমন Xk3J9aBq2LmZp0TrYw7NcD) বানিয়ে ডাটাবেসে সেভ করে।
         - ক্লোন বট: items = [ফাইলের তথ্য...]
@@ -86,6 +87,8 @@ class Database:
                     "owner_uid": int(owner_uid),
                     "items": items,
                     "db_msg_id": db_msg_id,
+                    "channel_id": channel_id,   # ✨ ক্লোনের স্টোরেজ চ্যানেল (থাকলে ফাইল সেখানে থাকে)
+                    "msg_ids": msg_ids,         # ✨ ওই চ্যানেলের মেসেজ আইডি(গুলো)
                     "created": int(time.time()),
                 })
                 return code
