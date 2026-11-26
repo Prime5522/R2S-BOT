@@ -18,7 +18,7 @@ from config import (
 from Script import script
 from database import get_db, get_clone_database
 from database.clonedb import clone_db, has_clone_access, is_owner, active_moderators
-from clone_manager import start_clone, stop_clone, restart_clone, delete_clone, RUNNING_CLONES
+from clone_manager import start_clone, stop_clone, restart_clone, delete_clone, change_clone_bot, RUNNING_CLONES
 from utils import sc, format_duration, short_duration, resolve_user_ref, parse_duration, mod_expiry_ts, mod_left_text, mod_is_permanent
 from bot_commands import set_staff_commands, clear_staff_commands
 from plugins.send_file import MIN_AUTODELETE_SECONDS, MAX_AUTODELETE_SECONDS
@@ -425,11 +425,14 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
     autodel_on = bool(owner_settings.get("auto_delete", True))
 
     text = (
-        f"<b>✨ {sc('Clone Control Panel')} — @{bot_username}</b>\n\n"
-        f"📌 <b>Status:</b> {status_label}\n\n"
-        f"{sc('Your clone is a fully independent bot with its own database.')}\n"
-        f"{sc('Tap a category below to customize it:')}\n\n"
-        f"🎨 <b>{sc('Start Screen')}</b> — {sc('what users see on /start (picture, welcome text, extra buttons)')}"
+        f"<b>💎 {sc('Clone Control Panel')}</b>\n"
+        "<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
+        f"🤖 <b>{sc('Bot')}:</b> @{bot_username}\n"
+        f"{'🟢' if status == 'active' else '🔴'} <b>{sc('Status')}:</b> {status_label}\n"
+        "<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
+        f"<blockquote>✨ {sc('Your clone is a fully independent bot with its own database. Tap a category below to customize every part of it.')}</blockquote>\n\n"
+        f"🎨 {sc('Start Screen')}  •  📝 {sc('Caption')}  •  🔗 {sc('Shortener')}\n"
+        f"📢 {sc('Force Sub')}  •  ⏱ {sc('Auto Delete')}  •  👮 {sc('Moderators')}"
     )
     if not viewer_is_owner:
         mod = next((m for m in active_moderators(clone_doc) if int(m["user_id"]) == viewer_id), None)
@@ -476,26 +479,78 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
     if viewer_is_owner:
         buttons[-1].append(InlineKeyboardButton(sc("👮 Moderator"), callback_data=f"clone_mods#{bot_id}"))
     buttons += [
-        [InlineKeyboardButton(sc("📑 Full Details"), callback_data=f"clone_details#{bot_id}")],
-        [InlineKeyboardButton(sc("🔄 Reset All Clone Settings"), callback_data=f"clone_reset#{bot_id}")],
         [
-            InlineKeyboardButton(sc("🔁 Restart"), callback_data=f"clone_restart#{bot_id}"),
-            InlineKeyboardButton(sc(toggle_label), callback_data=f"clone_toggle#{bot_id}"),
+            InlineKeyboardButton(sc("📑 Full Details"), callback_data=f"clone_details#{bot_id}"),
+            InlineKeyboardButton(sc("🔄 Reset All"), callback_data=f"clone_reset#{bot_id}"),
         ],
+        # ✨ Restart / Deactivate / Delete / Change Bot — সব এই এক বাটনের ভিতরে
+        [InlineKeyboardButton(sc("⚙️ Bot Control"), callback_data=f"clone_control#{bot_id}")],
+        # Back সরাসরি Home-এ যায় (আগে "clone_card"-এ যেত যা একই প্যানেল আবার খুলত)
+        [InlineKeyboardButton(sc("« Back"), callback_data="start")],
     ]
-    # ✨ Back এখন সরাসরি Home-এ যায় (আগে "clone_card"-এ যেত, যা আবার এই একই প্যানেলই খুলত — তাই লুপ হতো)
-    if viewer_is_owner:
-        buttons.append([
-            InlineKeyboardButton(sc("🗑 Delete Clone"), callback_data=f"clone_delete#{bot_id}"),
-            InlineKeyboardButton(sc("« Back"), callback_data="start"),
-        ])
-    else:
-        buttons.append([InlineKeyboardButton(sc("« Back"), callback_data="start")])
 
     markup = InlineKeyboardMarkup(buttons)
     if is_callback:
         return await send_or_edit_text(target, text, markup)
     return await target.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+
+
+# ================= ✨ BOT CONTROL ✨ =================
+
+async def show_control_view(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    viewer_is_owner = is_owner(clone_doc, target.from_user.id)
+    active = clone_doc.get("status", "active") == "active"
+    text = (
+        f"<b>⚙️ {sc('Bot Control')}</b>\n"
+        "<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
+        f"🤖 @{clone_doc.get('bot_username')}  •  {'🟢 Active' if active else '🔴 Inactive'}\n"
+        "<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
+        f"<blockquote>🔁 <b>Restart</b> — {sc('refresh the bot')}\n"
+        f"{'⛔ <b>Deactivate</b>' if active else '✅ <b>Activate</b>'} — {sc('turn the bot off / on')}\n"
+    )
+    if viewer_is_owner:
+        text += (
+            f"🔄 <b>Change Bot</b> — {sc('move everything to a new bot token')}\n"
+            f"🗑 <b>Delete Clone</b> — {sc('remove this clone forever')}"
+        )
+    text += "</blockquote>"
+
+    buttons = [[
+        InlineKeyboardButton(sc("🔁 Restart"), callback_data=f"clone_restart#{bot_id}"),
+        InlineKeyboardButton(sc("⛔ Deactivate" if active else "✅ Activate"), callback_data=f"clone_toggle#{bot_id}"),
+    ]]
+    if viewer_is_owner:
+        buttons.append([InlineKeyboardButton(sc("🔄 Change Bot"), callback_data=f"clone_changebot#{bot_id}")])
+        buttons.append([InlineKeyboardButton(sc("🗑 Delete Clone"), callback_data=f"clone_delete#{bot_id}")])
+    buttons.append([InlineKeyboardButton(sc("« Back"), callback_data=f"manage_clone#{bot_id}")])
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
+
+
+# ================= ✨ STORAGE CHANNEL ✨ =================
+
+async def show_storage_view(target, clone_doc: dict):
+    bot_id = clone_doc["bot_id"]
+    owner_id = clone_doc["owner_id"]
+    channel = clone_doc.get("storage_channel")
+    text = (
+        f"<b>📦 {sc('Storage Channel')}</b>\n"
+        "<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
+        f"<b>Status:</b> {'Connected ✅' if channel else 'Not set ⚠️'}"
+        + (f"\n<b>Channel ID:</b> <code>{channel}</code>" if channel else "")
+        + "\n<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
+        "<blockquote>Your files are saved in this private channel. If your bot is ever banned, "
+        "connect a new bot to the same channel and your links keep working.</blockquote>\n\n"
+        "<b>How to set it up:</b>\n"
+        "1️⃣ Create a <b>private channel</b>\n"
+        f"2️⃣ Add @{clone_doc.get('bot_username')} as <b>admin</b> (Post Messages)\n"
+        "3️⃣ Tap <b>Set Channel</b> and forward any message from that channel"
+    )
+    buttons = [[InlineKeyboardButton(sc("📌 Change Channel" if channel else "📌 Set Channel"), callback_data=f"clone_storage_set#{bot_id}")]]
+    if channel:
+        buttons.append([InlineKeyboardButton(sc("🗑 Remove Channel"), callback_data=f"clone_storage_rm#{bot_id}")])
+    buttons.append([InlineKeyboardButton(sc("« Back"), callback_data=f"permanent_link_setgs#{owner_id}#{bot_id}")])
+    return await send_or_edit_text(target, text, InlineKeyboardMarkup(buttons))
 
 
 # ================= ✨ STATUS (popup) ✨ =================
@@ -1503,6 +1558,88 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
         )
         return True
 
+    # ---------------- ✨ Bot Control মেনু ✨ ----------------
+    if data.startswith("clone_control#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await show_control_view(query, clone_doc)
+        return True
+
+    # ---------------- ✨ Change Bot (শুধু ওনার) ✨ ----------------
+    if data.startswith("clone_changebot#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            await query.answer("⚠️ Only the clone owner can change the bot.", show_alert=True)
+            return True
+        await set_pending_input(client, user_id, action="change_bot_token",
+                                back_cb=f"clone_control#{bot_id}", data={"bot_id": bot_id})
+        await send_or_edit_text(
+            query,
+            f"<b>🔄 {sc('Change Bot')}</b>\n"
+            "<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
+            "<blockquote>Everything stays: settings, users, moderators, storage channel and your "
+            "permanent links. Only the bot itself is replaced.</blockquote>\n\n"
+            "1️⃣ Create a new bot in @BotFather\n"
+            "2️⃣ <b>Forward</b> the BotFather message containing the new token here\n\n"
+            f"⚠️ <i>@{clone_doc.get('bot_username')} will stop working after the change. "
+            "If you use a Storage Channel, add the new bot there as admin.</i>\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_control#{bot_id}")]]),
+        )
+        return True
+
+    # ---------------- ✨ Storage channel ✨ ----------------
+    if data.startswith("clone_storage#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await clear_pending_input(client, user_id)
+        await show_storage_view(query, clone_doc)
+        return True
+
+    if data.startswith("clone_storage_set#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await set_pending_input(client, user_id, action="set_storage_channel",
+                                back_cb=f"clone_storage#{bot_id}", data={"bot_id": bot_id})
+        await send_or_edit_text(
+            query,
+            f"<b>📌 {sc('Set Storage Channel')}</b>\n\n"
+            f"Make sure @{clone_doc.get('bot_username')} is an <b>admin</b> of your private channel "
+            "(with Post Messages), then <b>forward any message from that channel</b> here.\n\n"
+            "You can also send the channel ID (like <code>-1001234567890</code>).\n\n"
+            "Send /cancel to cancel.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"clone_storage#{bot_id}")]]),
+        )
+        return True
+
+    if data.startswith("clone_storage_rm#"):
+        bot_id = int(data.split("#")[1])
+        clone_doc = await clone_db.get_clone(bot_id)
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
+            await query.answer("⚠️ Access denied!", show_alert=True)
+            return True
+        await clone_db.update_clone_settings(bot_id, {"storage_channel": None})
+        running = RUNNING_CLONES.get(bot_id)
+        if running:
+            running.storage_channel = None
+        # স্টোরেজ চ্যানেল ছাড়া পার্মানেন্ট লিংক চলে না — তাই বন্ধ করে দেওয়া হয়
+        cdb = get_clone_database(bot_id, clone_doc["db_name"])
+        await cdb.update_user_info(int(clone_doc["owner_id"]), {"permanent_link_mode": False})
+        await query.answer("🗑 Storage channel removed. Permanent Link turned OFF.", show_alert=True)
+        clone_doc = await clone_db.get_clone(bot_id)
+        await show_storage_view(query, clone_doc)
+        return True
+
     return False
 
 
@@ -1766,6 +1903,121 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
         clone_doc = await clone_db.get_clone(target_bot_id)
         if clone_doc:
             await show_filebtns_view(message, clone_doc)
+        await message.stop_propagation()
+        return
+
+    if action == "set_storage_channel":
+        target_bot_id = int(data["bot_id"])
+        clone_doc = await clone_db.get_clone(target_bot_id)
+        if not clone_doc or not has_clone_access(clone_doc, user_id):
+            PENDING_INPUTS.pop(state_key, None)
+            await message.reply_text("⚠️ Access denied.")
+            await message.stop_propagation()
+            return
+
+        chat_id = None
+        fc = getattr(message, "forward_from_chat", None)
+        if not fc and getattr(message, "forward_origin", None):
+            fc = getattr(message.forward_origin, "chat", None)
+        if fc:
+            chat_id = fc.id
+        elif message.text and re.fullmatch(r"-100\d{5,}", message.text.strip()):
+            chat_id = int(message.text.strip())
+
+        if not chat_id:
+            await message.reply_text(
+                "❌ Please <b>forward a message from your channel</b> (or send its ID like <code>-1001234567890</code>).\n\n"
+                "Send /cancel to cancel.",
+                reply_markup=back_markup,
+            )
+            await message.stop_propagation()
+            return
+
+        running = RUNNING_CLONES.get(target_bot_id)
+        if not running:
+            await message.reply_text("⚠️ Your clone bot is not running. Activate it first, then try again.", reply_markup=back_markup)
+            await message.stop_propagation()
+            return
+
+        try:
+            test = await running.send_message(chat_id, "✅ Storage channel connected successfully.")
+            try:
+                await test.delete()
+            except Exception:
+                pass
+        except Exception:
+            await message.reply_text(
+                f"❌ @{clone_doc.get('bot_username')} can't post in that channel.\n\n"
+                "Add the bot as an <b>admin</b> with <b>Post Messages</b> permission, then forward a message again.",
+                reply_markup=back_markup,
+            )
+            await message.stop_propagation()
+            return
+
+        PENDING_INPUTS.pop(state_key, None)
+        await clone_db.update_clone_settings(target_bot_id, {"storage_channel": chat_id})
+        running.storage_channel = chat_id
+        await message.reply_text(
+            f"✅ <b>Storage channel connected!</b>\n\n<code>{chat_id}</code>\n\n"
+            "New files will now be saved there. You can turn on Permanent Link.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "🔗 Permanent Link", callback_data=f"permanent_link_setgs#{clone_doc['owner_id']}#{target_bot_id}")]]),
+        )
+        await message.stop_propagation()
+        return
+
+    if action == "change_bot_token":
+        target_bot_id = int(data["bot_id"])
+        clone_doc = await clone_db.get_clone(target_bot_id)
+        if not clone_doc or not is_owner(clone_doc, user_id):
+            PENDING_INPUTS.pop(state_key, None)
+            await message.reply_text("⚠️ Only the clone owner can change the bot.")
+            await message.stop_propagation()
+            return
+
+        fwd_user = getattr(message, "forward_from", None)
+        if not fwd_user and getattr(message, "forward_origin", None):
+            fwd_user = getattr(message.forward_origin, "sender_user", None)
+        is_botfather = bool(
+            fwd_user and (
+                (getattr(fwd_user, "username", None) or "").lower() == "botfather"
+                or getattr(fwd_user, "id", None) == 93372553
+            )
+        )
+        match = re.search(r"\b(\d{6,}:[A-Za-z0-9_-]{30,})\b", message.text or message.caption or "")
+        if not is_botfather or not match:
+            await message.reply_text(
+                "❌ Please <b>forward</b> the message from @BotFather that contains the new bot's token.\n\n"
+                "Send /cancel to cancel.",
+                reply_markup=back_markup,
+            )
+            await message.stop_propagation()
+            return
+
+        PENDING_INPUTS.pop(state_key, None)
+        wait_msg = await message.reply_text("<i>⏳ Verifying the new token and moving your clone, please wait...</i>")
+        try:
+            new_me = await change_clone_bot(target_bot_id, match.group(1).strip())
+        except Exception as e:
+            await wait_msg.edit_text(
+                f"❌ <b>Could not change the bot:</b>\n<code>{e}</code>\n\nYour current bot was not changed.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data=f"manage_clone#{target_bot_id}")]]),
+            )
+            await message.stop_propagation()
+            return
+
+        note = ""
+        if clone_doc.get("storage_channel"):
+            note = f"\n\n📦 <b>Important:</b> add @{new_me.username} as <b>admin</b> of your Storage Channel so files keep working."
+        await wait_msg.edit_text(
+            f"✅ <b>Bot changed successfully!</b>\n\n"
+            f"🤖 <b>New bot:</b> @{new_me.username}\n\n"
+            "All settings, users, moderators and permanent links were kept."
+            + note,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"⚙️ Customize @{new_me.username}", callback_data=f"manage_clone#{new_me.id}")],
+            ]),
+        )
         await message.stop_propagation()
         return
 
