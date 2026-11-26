@@ -120,6 +120,7 @@ async def start_clone(bot_token: str, owner_id: int, owner_mention: str = None):
     clone_client.custom_file_buttons = clone_doc.get("file_buttons") or []
     clone_client.owner_mention = clone_doc.get("owner_mention")
     clone_client.moderators = clone_doc.get("moderators") or []
+    clone_client.storage_channel = clone_doc.get("storage_channel")
     clone_client.started_at = time.time()
 
     RUNNING_CLONES[bot_id] = clone_client
@@ -135,6 +136,39 @@ async def start_clone(bot_token: str, owner_id: int, owner_mention: str = None):
         logger.warning(f"Command setup failed for @{me.username}: {e}")
     logger.info(f"Clone started: @{me.username} ({bot_id}) owner={owner_id}")
     return me
+
+
+async def change_clone_bot(old_bot_id: int, new_token: str):
+    """
+    ✨ Change Bot: একই ক্লোন (সেটিংস, ইউজার, মডারেটর, স্টোরেজ চ্যানেল, লিংক) থাকবে —
+    শুধু বট বদলে নতুন টোকেনের বট হবে। পুরনো পার্মানেন্ট লিংক নিজে থেকে নতুন বটে যাবে।
+    """
+    new_token = new_token.strip()
+    doc = await clone_db.get_clone(old_bot_id)
+    if not doc:
+        raise ValueError("Clone not found.")
+    if new_token == BOT_TOKEN.strip():
+        raise ValueError("You cannot use the main bot as your clone.")
+    if new_token == doc.get("bot_token"):
+        raise ValueError("This is already your current bot's token.")
+
+    # নতুন টোকেন ঠিক আছে কিনা — আলাদা অস্থায়ী ক্লায়েন্টে যাচাই
+    tmp = Client(
+        name=f"chg_{old_bot_id}_{int(time.time())}",
+        api_id=API_ID, api_hash=API_HASH, bot_token=new_token, in_memory=True,
+    )
+    await tmp.start()
+    try:
+        me = await tmp.get_me()
+        if await clone_db.get_clone(me.id):
+            raise ValueError("This bot is already registered as a clone.")
+        session = await tmp.export_session_string()
+    finally:
+        await tmp.stop()
+
+    await stop_clone(old_bot_id)
+    await clone_db.replace_clone_bot(old_bot_id, me.id, me.username, new_token, session, fingerprint(new_token, API_ID))
+    return await start_clone(new_token, int(doc["owner_id"]), owner_mention=doc.get("owner_mention"))
 
 
 async def stop_clone(bot_id: int):
