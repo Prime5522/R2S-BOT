@@ -82,10 +82,11 @@ async def get_caption(cur_db, user_id: int, file_name: str, file_size: str,
     return f"📂 {file_name}"
 
 
-async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int):
+async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int, channel_id: int = None):
     cur_db = get_db(bot)
     try:
-        file_msg = await bot.get_messages(DB_CHANNEL, file_id)
+        from_chat = channel_id or DB_CHANNEL
+        file_msg = await bot.get_messages(from_chat, file_id)
 
         has_name = True
         if file_msg.document:
@@ -119,10 +120,11 @@ async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int)
         owner = await cur_db.get_user(owner_uid)
         protect = owner.get("protect_content", False)
 
-        base_rows = [[InlineKeyboardButton('✛ Watch & Download ✛', callback_data=f'stream#{file_id}')]]
+        # স্ট্রিম বাটন শুধু মূল বটের (ক্লোনের স্টোরেজ চ্যানেলে নয়)
+        base_rows = [] if channel_id else [[InlineKeyboardButton('✛ Watch & Download ✛', callback_data=f'stream#{file_id}')]]
         return await bot.copy_message(
             chat_id=user_id,
-            from_chat_id=DB_CHANNEL,
+            from_chat_id=from_chat,
             message_id=file_id,
             caption=caption,
             protect_content=protect,
@@ -131,7 +133,7 @@ async def media_forward(bot: Client, user_id: int, file_id: int, owner_uid: int)
 
     except FloodWait as e:
         await asyncio.sleep(e.value)
-        return await media_forward(bot, user_id, file_id, owner_uid)
+        return await media_forward(bot, user_id, file_id, owner_uid, channel_id)
 
 
 async def send_cached_clone_item(bot: Client, user_id: int, item: dict, owner_uid: int, cur_db):
@@ -212,6 +214,8 @@ async def resolve_start_payload(cur_db, raw: str):
             "owner_uid": int(doc["owner_uid"]),
             "items": doc.get("items"),
             "db_msg_id": doc.get("db_msg_id"),
+            "channel_id": doc.get("channel_id"),
+            "msg_ids": doc.get("msg_ids"),
             "payload": raw,
         }
     return None
@@ -243,6 +247,25 @@ async def deliver_files(client: Client, message: Message, raw: str):
 
     owner_settings = await cur_db.get_user(owner_uid)
     chat_id = message.from_user.id
+
+    # ---- ✨ ক্লোন: ওনারের স্টোরেজ চ্যানেল থেকে (বট বদলালেও লিংক বাঁচে) ----
+    if target.get("msg_ids"):
+        msg_ids = list(target["msg_ids"])
+        if len(msg_ids) > 1:
+            await message.reply_text(f"**📦 Total Files:** `{len(msg_ids)}`")
+        sent_msgs = []
+        try:
+            for mid in msg_ids:
+                m = await media_forward(client, user_id=chat_id, file_id=int(mid),
+                                        owner_uid=owner_uid, channel_id=int(target["channel_id"]))
+                sent_msgs.append(m)
+        except Exception as e:
+            print(f"[storage] delivery failed: {e!r}")
+            if not sent_msgs:
+                return await message.reply_text(
+                    "⚠️ This file is temporarily unavailable.\nPlease contact the bot owner."
+                )
+        return await schedule_autodelete(client, message, sent_msgs, owner_settings)
 
     # ---- ক্লোন: ক্যাশ করা ফাইল আইটেম ----
     if target["items"] is not None:
