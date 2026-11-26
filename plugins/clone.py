@@ -484,7 +484,7 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
             InlineKeyboardButton(sc("🔄 Reset All"), callback_data=f"clone_reset#{bot_id}"),
         ],
         # ✨ Restart / Deactivate / Delete / Change Bot — সব এই এক বাটনের ভিতরে
-        [InlineKeyboardButton(sc("⚙️ Bot Control"), callback_data=f"clone_control#{bot_id}")],
+        [InlineKeyboardButton(sc("⚙️ Clone Bot Control"), callback_data=f"clone_control#{bot_id}")],
         # Back সরাসরি Home-এ যায় (আগে "clone_card"-এ যেত যা একই প্যানেল আবার খুলত)
         [InlineKeyboardButton(sc("« Back"), callback_data="start")],
     ]
