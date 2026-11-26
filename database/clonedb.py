@@ -87,6 +87,26 @@ class CloneDB:
     async def update_clone_settings(self, bot_id: int, values: dict):
         await self.clones.update_one({"bot_id": int(bot_id)}, {"$set": values})
 
+    # ================= ✨ Permanent-link index (code → clone bot) ✨ =================
+    async def index_link(self, code: str, bot_id: int):
+        await mydb.link_index.update_one({"_id": code}, {"$set": {"bot_id": int(bot_id)}}, upsert=True)
+
+    async def get_link_bot(self, code: str):
+        doc = await mydb.link_index.find_one({"_id": code})
+        return int(doc["bot_id"]) if doc else None
+
+    # ================= ✨ Change Bot (একই ক্লোন, নতুন বট) ✨ =================
+    async def replace_clone_bot(self, old_bot_id: int, new_bot_id: int, username: str,
+                                token: str, session: str, fp: str):
+        await self.clones.update_one(
+            {"bot_id": int(old_bot_id)},
+            {"$set": {
+                "bot_id": int(new_bot_id), "bot_username": username, "bot_token": token,
+                "session_string": session, "session_fp": fp, "status": "active",
+            }},
+        )
+        await mydb.link_index.update_many({"bot_id": int(old_bot_id)}, {"$set": {"bot_id": int(new_bot_id)}})
+
     # ================= ✨ Saved sessions ✨ =================
     async def get_clone_by_token(self, bot_token: str):
         return await self.clones.find_one({"bot_token": bot_token})
