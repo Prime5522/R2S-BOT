@@ -78,6 +78,38 @@ async def edit_caption_or_text(query: CallbackQuery, text: str, reply_markup: In
     )
 
 
+async def build_permanent_panel(cur_db, target_uid: int, clone_bot_id: int = None):
+    back_cb = build_back_cb(target_uid, clone_bot_id)
+    user = await cur_db.get_user(target_uid)
+    is_on = user.get("permanent_link_mode", False)
+    toggle_cb = f"toggle_permanent_link#{target_uid}#{is_on}" + (f"#{clone_bot_id}" if clone_bot_id else "")
+
+    text = (
+        "<b>💎 Permanent Link</b>\n"
+        "<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
+        "<blockquote>Links open through our website first, so they keep working even if "
+        "your bot is ever replaced.</blockquote>\n\n"
+        f"<b>Status:</b> <code>{'ON ✅' if is_on else 'OFF ❌'}</code>\n"
+    )
+    buttons = [[InlineKeyboardButton(f"Turn {'OFF ❌' if is_on else 'ON ✅'}", callback_data=toggle_cb)]]
+
+    if clone_bot_id:
+        doc = await clone_db.get_clone(clone_bot_id)
+        has_channel = bool(doc and doc.get("storage_channel"))
+        text += (
+            f"<b>Storage Channel:</b> {'Connected ✅' if has_channel else 'Not set ⚠️'}\n\n"
+            "📦 <i>A private Storage Channel is required: your files are saved there, so a new bot "
+            "can serve the same links if this one is ever banned.</i>"
+        )
+        buttons.append([InlineKeyboardButton(
+            f"📦 Storage Channel {'✅' if has_channel else '⚠️'}", callback_data=f"clone_storage#{clone_bot_id}"
+        )])
+    else:
+        text += "\nWhen disabled, direct Telegram t.me links are generated."
+    buttons.append([InlineKeyboardButton("« Back", callback_data=back_cb)])
+    return text, InlineKeyboardMarkup(buttons)
+
+
 async def build_autodelete_panel(cur_db, target_uid: int, clone_bot_id: int = None):
     sfx = build_suffix(target_uid, clone_bot_id)
     back_cb = build_back_cb(target_uid, clone_bot_id)
@@ -356,41 +388,26 @@ async def cb_handler(client: Client, query: CallbackQuery):
     elif query.data.startswith("permanent_link_setgs"):
         target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
         cur_db = await resolve_target_db(client, clone_bot_id)
-        back_cb = build_back_cb(target_uid, clone_bot_id)
-        user = await cur_db.get_user(target_uid)
-        is_on = user.get("permanent_link_mode", False)
-        text = (
-            "<b>🔗 Permanent Link Settings</b>\n\n"
-            "When enabled, file links use the Website URL (e.g. https://.../file_id...).\n"
-            "When disabled, direct Telegram t.me links are generated.\n\n"
-            f"<b>Current Status:</b> <code>{'ON ✅' if is_on else 'OFF ❌'}</code>"
-        )
-        buttons = [
-            [InlineKeyboardButton(f"Turn {'OFF ❌' if is_on else 'ON ✅'}", callback_data=f"toggle_permanent_link#{target_uid}#{is_on}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
-            [InlineKeyboardButton("« Back", callback_data=back_cb)]
-        ]
-        await send_or_edit_text(query, text, InlineKeyboardMarkup(buttons))
+        text, markup = await build_permanent_panel(cur_db, target_uid, clone_bot_id)
+        await send_or_edit_text(query, text, markup)
 
     elif query.data.startswith("toggle_permanent_link"):
         target_uid, status, clone_bot_id = parse_toggle_target(query.data, user_id)
         cur_db = await resolve_target_db(client, clone_bot_id)
-        back_cb = build_back_cb(target_uid, clone_bot_id)
         new_status = False if status == 'True' else True
+
+        # ✨ ক্লোনে পার্মানেন্ট লিংক চালু করতে আগে স্টোরেজ চ্যানেল লাগবে
+        if new_status and clone_bot_id:
+            doc = await clone_db.get_clone(clone_bot_id)
+            if not doc or not doc.get("storage_channel"):
+                await query.answer("⚠️ Please set a Storage Channel first!", show_alert=True)
+                text, markup = await build_permanent_panel(cur_db, target_uid, clone_bot_id)
+                return await send_or_edit_text(query, text, markup)
+
         await cur_db.update_user_info(target_uid, {"permanent_link_mode": new_status})
-        user = await cur_db.get_user(target_uid)
-        is_on = user.get("permanent_link_mode", False)
-        text = (
-            "<b>🔗 Permanent Link Settings</b>\n\n"
-            "When enabled, file links use the Website URL (e.g. https://.../file_id...).\n"
-            "When disabled, direct Telegram t.me links are generated.\n\n"
-            f"<b>Current Status:</b> <code>{'ON ✅' if is_on else 'OFF ❌'}</code>"
-        )
-        buttons = [
-            [InlineKeyboardButton(f"Turn {'OFF ❌' if is_on else 'ON ✅'}", callback_data=f"toggle_permanent_link#{target_uid}#{is_on}" + (f"#{clone_bot_id}" if clone_bot_id else ""))],
-            [InlineKeyboardButton("« Back", callback_data=back_cb)]
-        ]
-        await send_or_edit_text(query, text, InlineKeyboardMarkup(buttons))
-        await query.answer(f"✅ Permanent Link mode is now {'ON' if is_on else 'OFF'}")
+        text, markup = await build_permanent_panel(cur_db, target_uid, clone_bot_id)
+        await send_or_edit_text(query, text, markup)
+        await query.answer(f"✅ Permanent Link mode is now {'ON' if new_status else 'OFF'}")
 
     elif query.data.startswith("force_channel_setgs"):
         target_uid, clone_bot_id = parse_settings_target(query.data, user_id)
