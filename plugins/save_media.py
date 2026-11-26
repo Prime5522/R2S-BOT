@@ -8,6 +8,7 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
 from utils import str_to_b64, humanbytes
 from database import get_db
+from database.clonedb import clone_db
 
 BATCH_SLEEP = 2
 
@@ -64,15 +65,25 @@ def make_link(bot_username: str, code: str) -> str:
     return f"https://t.me/{bot_username}?start={code}"
 
 
-def permanent_link(code: str, clone_username: str = None) -> str:
+def permanent_link(code: str) -> str:
     """
     https://primexstore.pages.dev/?PrimeXBots=<পরিষ্কার-কোড>
-    ক্লোন বটের লিংকে &bot=<ক্লোনের-ইউজারনেম> যোগ হয়, যাতে ওয়েবসাইট ঠিক ক্লোন বটেই পাঠায়।
+    লিংকে বটের নাম নেই — ওয়েবসাইট API থেকে জেনে নেয় এই কোড এখন কোন বটের।
+    ক্লোন বট বদলালে (Change Bot) সব পুরনো লিংক নিজে থেকে নতুন বটে চলে যায়।
     """
-    link = f"{WEBSITE_URL.rstrip('/')}/?{WEBSITE_PARAM}={code}"
-    if clone_username:
-        link += f"&bot={clone_username}"
-    return link
+    return f"{WEBSITE_URL.rstrip('/')}/?{WEBSITE_PARAM}={code}"
+
+
+async def copy_to_storage(bot: Client, message: Message, channel_id: int):
+    """ক্লোনের স্টোরেজ চ্যানেলে ফাইল কপি। ব্যর্থ হলে None (তখন file_id পদ্ধতিতে ফিরে যায়)।"""
+    try:
+        return await message.copy(channel_id)
+    except FloodWait as sl:
+        await asyncio.sleep(sl.value)
+        return await copy_to_storage(bot, message, channel_id)
+    except Exception as e:
+        print(f"[storage] copy failed for channel {channel_id}: {e!r}")
+        return None
 
 
 def build_share_buttons(is_clone: bool, share_link: str, short_link: str):
@@ -116,15 +127,30 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
     try:
         messages = await bot.get_messages(chat_id=editable.chat.id, message_ids=message_ids)
 
+        stored_in_channel = False
         if is_clone:
-            items = []
-            for m in messages:
-                info = extract_media_info(m)
-                if info:
-                    items.append(info)
-            if not items:
-                return await editable.edit("❌ No valid media files found in your batch!")
-            code = await cur_db.create_link(owner_uid, items=items)
+            code = None
+            channel = getattr(bot, "storage_channel", None)
+            if channel:
+                ch_ids = []
+                for m in messages:
+                    if extract_media_info(m):
+                        c = await copy_to_storage(bot, m, channel)
+                        if c:
+                            ch_ids.append(c.id)
+                        await asyncio.sleep(BATCH_SLEEP)
+                if ch_ids:
+                    code = await cur_db.create_link(owner_uid, channel_id=channel, msg_ids=ch_ids)
+                    stored_in_channel = True
+            if code is None:
+                items = []
+                for m in messages:
+                    info = extract_media_info(m)
+                    if info:
+                        items.append(info)
+                if not items:
+                    return await editable.edit("❌ No valid media files found in your batch!")
+                code = await cur_db.create_link(owner_uid, items=items)
         else:
             sent_ids = []
             for message in messages:
@@ -145,8 +171,10 @@ async def save_batch_media_in_channel(bot: Client, editable: Message, message_id
             code = await cur_db.create_link(owner_uid, db_msg_id=db_msg_id)
 
         user = await cur_db.get_user(owner_uid)
-        if user.get("permanent_link_mode", False):
-            share_link = permanent_link(code, bot_username if is_clone else None)
+        if user.get("permanent_link_mode", False) and (not is_clone or stored_in_channel):
+            share_link = permanent_link(code)
+            if is_clone:
+                await clone_db.index_link(code, bot.bot_id)
         else:
             share_link = make_link(bot_username, code)
 
@@ -206,11 +234,20 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
         owner_uid = effective_owner(bot, uploader_uid)
 
         db_msg_id = None
+        stored_in_channel = False
         if is_clone:
             info = extract_media_info(message)
             if not info:
                 return await editable.edit("❌ Unsupported file type!")
-            code = await cur_db.create_link(owner_uid, items=[info])
+            code = None
+            channel = getattr(bot, "storage_channel", None)
+            if channel:
+                c = await copy_to_storage(bot, message, channel)
+                if c:
+                    code = await cur_db.create_link(owner_uid, channel_id=channel, msg_ids=[c.id])
+                    stored_in_channel = True
+            if code is None:
+                code = await cur_db.create_link(owner_uid, items=[info])
         else:
             copied_msg = await message.copy(DB_CHANNEL)
             db_msg_id = copied_msg.id
@@ -224,8 +261,10 @@ async def save_media_in_channel(bot: Client, editable: Message, message: Message
             code = await cur_db.create_link(owner_uid, db_msg_id=db_msg_id)
 
         user = await cur_db.get_user(owner_uid)
-        if user.get("permanent_link_mode", False):
-            share_link = permanent_link(code, bot_username if is_clone else None)
+        if user.get("permanent_link_mode", False) and (not is_clone or stored_in_channel):
+            share_link = permanent_link(code)
+            if is_clone:
+                await clone_db.index_link(code, bot.bot_id)
         else:
             share_link = make_link(bot_username, code)
 
