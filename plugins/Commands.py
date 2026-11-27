@@ -9,7 +9,7 @@ from Script import script
 from plugins.send_file import schedule_autodelete
 from bot_commands import ensure_staff_commands
 from database import get_db
-from plugins.verification import handle_verify_case, av_verification
+from plugins.verification import handle_verify_case, primexbots_verification
 from plugins.clone import build_start_content, send_clone_entry, send_start_reply_safely
 
 
@@ -237,7 +237,7 @@ async def deliver_files(client: Client, message: Message, raw: str):
     if IS_FSUB and not await get_fsub(client, message, owner_uid=owner_uid):
         return
 
-    verified = await av_verification(client, message, owner_uid=owner_uid, file_id=target["payload"])
+    verified = await primexbots_verification(client, message, owner_uid=owner_uid, file_id=target["payload"])
     if not verified:
         return
 
