@@ -150,6 +150,29 @@ async def cb_handler(client: Client, query: CallbackQuery):
     if query.data == "close_data":
         await query.message.delete()
 
+    elif query.data == "seeplans":
+        # 💎 "Buy Subscription" বাটন — ভেরিফিকেশন এড়ানোর প্রিমিয়াম অ্যাক্সেস সম্পর্কে
+        if getattr(client, "is_clone", False):
+            owner_ref = f"<a href='tg://user?id={client.owner_id}'>the bot owner</a>"
+        else:
+            admin_id = ADMINS[0] if isinstance(ADMINS, (list, tuple)) else ADMINS
+            owner_ref = f"<a href='tg://user?id={admin_id}'>the bot admin</a>"
+        text = (
+            "<b>💎 Premium Access</b>\n"
+            "<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
+            "<blockquote>Skip the verification step and get your files instantly, every time.</blockquote>\n\n"
+            "✨ <b>Benefits</b>\n"
+            "• No token verification\n"
+            "• Direct file access\n"
+            "• Priority support\n\n"
+            f"📩 To get Premium, please contact {owner_ref}."
+        )
+        await send_or_edit_text(
+            query,
+            text,
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close", callback_data="close_data")]]),
+        )
+
     elif query.data == "about":
         # ✨ About পেজে Close-এর জায়গায় Source Code বাটন (লিংক config-এর CLONE_SOURCE_CODE_URL)
         if CLONE_SOURCE_CODE_URL:
@@ -288,7 +311,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
             return await query.answer("⚠️ Streaming is unavailable right now.", show_alert=True)
 
         file_hash = get_hash(AKS)
-        online = f"{URL}/watch/{AKS.id}/AV_File_{int(time.time())}.mkv?hash={file_hash}"
+        online = f"{URL}/watch/{AKS.id}/PrimeXBots_File_{int(time.time())}.mkv?hash={file_hash}"
         download = f"{URL}/{AKS.id}?hash={file_hash}"
 
         btn = [
