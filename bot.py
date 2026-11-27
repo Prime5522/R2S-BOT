@@ -21,7 +21,7 @@ class Bot(Client):
         saved_session = load_main_session_sync(DB_URL, DB_NAME, BOT_TOKEN, API_ID)
         self._used_saved_session = bool(saved_session)
         super().__init__(
-            name="avbotz",
+            name="PrimeXBots",
             api_id=API_ID,
             api_hash=API_HASH,
             bot_token=BOT_TOKEN,
