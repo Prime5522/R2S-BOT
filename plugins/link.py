@@ -13,43 +13,6 @@ from plugins.save_media import save_media_in_channel, extract_media_info, make_l
 from plugins.batch import add_to_batch
 
 
-async def av_verification(client, message, owner_uid: int = None):
-    db = get_db(client)
-    user_id = message.from_user.id
-
-    owner = await db.get_user(owner_uid)
-    download = owner.get("how_to_download", HOW_TO_VERIFY)
-    verify = owner.get("verify", VERIFY)
-
-    if verify and not await check_verification(client, user_id):
-        bot_username = getattr(client, "username", None) or (await client.get_me()).username
-        btn = [[
-            InlineKeyboardButton(
-                "✅️ Verify ✅️",
-                url=await get_token(client, user_id, f"https://t.me/{bot_username}?start=")
-            ),
-            InlineKeyboardButton("⁉️ How To Verify ⁉️", url=download)
-        ]]
-
-        d = await message.reply_text(
-            text=script.VERIFICATION_TEXT.format(message.from_user.mention),
-            protect_content=False,
-            reply_markup=InlineKeyboardMarkup(btn),
-            disable_web_page_preview=True,
-            parse_mode=ParseMode.HTML
-        )
-
-        await asyncio.sleep(600)
-        try:
-            await d.delete()
-            await message.delete()
-        except Exception:
-            pass
-        return False
-
-    return True
-
-
 @Client.on_message((filters.document | filters.video | filters.audio | filters.photo) & ~filters.chat(DB_CHANNEL))
 async def main(bot: Client, message):
     db = get_db(bot)
