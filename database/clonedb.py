@@ -95,6 +95,9 @@ class CloneDB:
         doc = await mydb.link_index.find_one({"_id": code})
         return int(doc["bot_id"]) if doc else None
 
+    async def delete_link_index(self, bot_id: int):
+        await mydb.link_index.delete_many({"bot_id": int(bot_id)})
+
     # ================= ✨ Change Bot (একই ক্লোন, নতুন বট) ✨ =================
     async def replace_clone_bot(self, old_bot_id: int, new_bot_id: int, username: str,
                                 token: str, session: str, fp: str):
@@ -103,6 +106,7 @@ class CloneDB:
             {"$set": {
                 "bot_id": int(new_bot_id), "bot_username": username, "bot_token": token,
                 "session_string": session, "session_fp": fp, "status": "active",
+                "start_pic": None,  # file_id বটভেদে আলাদা — নতুন বট প্রথম /start-এ bytes থেকে নিজেই বানিয়ে নেবে
             }},
         )
         await mydb.link_index.update_many({"bot_id": int(old_bot_id)}, {"$set": {"bot_id": int(new_bot_id)}})
