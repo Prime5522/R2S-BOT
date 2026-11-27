@@ -49,24 +49,27 @@ async def _staff(_, client, message):
 staff_filter = filters.create(_staff)
 
 
-async def _target_from(client: Client, message: Message, skip_args: int = 1):
-    """/ban 12345 | /ban @name | ফরোয়ার্ড করা মেসেজে রিপ্লাই — যেকোনোটা থেকে ইউজার বের করে"""
+async def _target_from(client: Client, message: Message):
+    """
+    /ban 12345 | /ban @name | ফরোয়ার্ড করা মেসেজে রিপ্লাই।
+    রিটার্ন: (ইউজার | None, আর্গুমেন্ট থেকে নেওয়া হয়েছে কিনা) — reason কোথা থেকে শুরু হবে সেটা ঠিক করতে।
+    """
     if len(message.command) > 1:
         fake = SimpleNamespace(text=message.command[1], forward_from=None, forward_origin=None, forward_date=None)
         res = await resolve_user_ref(client, fake)
         if res:
-            return res
+            return res, True
     if message.reply_to_message:
         res = await resolve_user_ref(client, message.reply_to_message)
         if res:
-            return res
-    return None
+            return res, False
+    return None, False
 
 
 # ---------------------- /ban ---------------------- #
 @Client.on_message(filters.command("ban") & filters.private & staff_filter)
 async def ban_command(client: Client, message: Message):
-    target = await _target_from(client, message)
+    target, used_arg = await _target_from(client, message)
     if not target:
         return await message.reply_text(
             "<b>Usage:</b>\n"
@@ -80,7 +83,8 @@ async def ban_command(client: Client, message: Message):
     if target.get("is_bot"):
         return await message.reply_text("⚠️ You can't ban a bot.")
 
-    reason = " ".join(message.command[2:]).strip() or None
+    # আইডি/ইউজারনেম আর্গুমেন্টে দিলে reason ২ নম্বর শব্দ থেকে; রিপ্লাই করলে ১ নম্বর শব্দ থেকে
+    reason = " ".join(message.command[2 if used_arg else 1:]).strip() or None
     cur_db = get_db(client)
     if await cur_db.is_banned(uid):
         return await message.reply_text(f"ℹ️ {target['mention']} (<code>{uid}</code>) is already banned.")
@@ -94,7 +98,7 @@ async def ban_command(client: Client, message: Message):
 # ---------------------- /unban ---------------------- #
 @Client.on_message(filters.command("unban") & filters.private & staff_filter)
 async def unban_command(client: Client, message: Message):
-    target = await _target_from(client, message)
+    target, _ = await _target_from(client, message)
     if not target:
         return await message.reply_text(
             "<b>Usage:</b>\n<code>/unban 123456789</code>\n<code>/unban @username</code>"
@@ -140,12 +144,13 @@ async def _is_denied(_, client, message):
     if not message.from_user or not message.command:
         return False
     uid = message.from_user.id
-    if is_bot_staff(client, uid):
-        return False
     cmd = message.command[0].lower().split("@")[0]
     is_clone = getattr(client, "is_clone", False)
-    if cmd in ("stats", "restart") and uid in _admin_ids():
-        return False  # মূল বটের অ্যাডমিন — তার নিজের হ্যান্ডলার চলবে
+    # /stats ও /restart শুধু মূল বটের ADMINS-এর — ক্লোন ওনার/মডারেটরও পাবে না (আগে চুপচাপ কিছুই হতো না)
+    if cmd in ("stats", "restart"):
+        return uid not in _admin_ids()
+    if is_bot_staff(client, uid):
+        return False
     if cmd in ADMIN_ONLY_COMMANDS:
         return True
     if cmd == "settings" and is_clone:
@@ -173,5 +178,4 @@ async def access_denied(client: Client, message: Message):
         text,
         quote=True,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="start")]]),
-        )
-    
+    )
