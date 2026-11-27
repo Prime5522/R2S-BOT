@@ -193,6 +193,7 @@ async def delete_clone(bot_id: int):
     clone_doc = await clone_db.get_clone(bot_id)
     await stop_clone(bot_id)
     await clone_db.delete_clone(bot_id)
+    await clone_db.delete_link_index(bot_id)   # ✨ পুরনো পার্মানেন্ট-লিংক ইনডেক্স পরিষ্কার
     if clone_doc:
         await drop_clone_database(bot_id, clone_doc["db_name"])
 
