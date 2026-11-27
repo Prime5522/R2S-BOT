@@ -207,24 +207,11 @@ async def send_start_reply_safely(
     reply_markup: InlineKeyboardMarkup,
 ):
     """
-    ✨ পিকচার পাঠানো এখন bytes (raw) কে সবসময় প্রথমে ট্রাই করে — এতে কোনো
-    পুরনো/ইনভ্যালিড file_id-র উপর নির্ভর করতে হয় না, তাই "পিকচার দেখাচ্ছে না"
-    সমস্যাটা আর হবে না। file_id (start_pic) শুধু bytes না থাকলে fallback
-    হিসেবে ব্যবহার হয় (পুরনো ডাটা/মূল বটের PICS এর জন্য)।
+    ✨ ক্লোনের নিজস্ব ক্যাশ করা file_id থাকলে সেটা দিয়ে সাথে সাথে পাঠায় (দ্রুত, আপলোড নেই)।
+    file_id না থাকলে বা অচল হলে bytes থেকে একবার আপলোড করে — আর পাওয়া নতুন file_id
+    ক্লায়েন্টে ও ডাটাবেসে (start_pic) সেভ করে রাখে, যাতে পরের /start আবার দ্রুত হয়।
     """
-    if start_pic_bytes:
-        try:
-            raw = bytes(start_pic_bytes)
-            bio = io.BytesIO(raw)
-            bio.name = "start.jpg"
-            return await reply_target.reply_photo(
-                photo=bio,
-                caption=caption_text,
-                reply_markup=reply_markup,
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception:
-            pass  # bytes দিয়ে না হলে নিচে file_id দিয়ে ট্রাই করবে
+    is_clone = getattr(client, "is_clone", False)
 
     if start_pic:
         try:
@@ -235,7 +222,29 @@ async def send_start_reply_safely(
                 parse_mode=enums.ParseMode.HTML,
             )
         except Exception:
-            pass  # file_id টাও কাজ না করলে নিচে টেক্সট হিসেবে পাঠাবে
+            if is_clone:
+                client.custom_start_pic = None  # অচল ক্যাশ — bytes থেকে নতুন করে বানানো হবে
+
+    if start_pic_bytes:
+        try:
+            bio = io.BytesIO(bytes(start_pic_bytes))
+            bio.name = "start.jpg"
+            sent = await reply_target.reply_photo(
+                photo=bio,
+                caption=caption_text,
+                reply_markup=reply_markup,
+                parse_mode=enums.ParseMode.HTML,
+            )
+            if is_clone and getattr(sent, "photo", None):
+                new_id = sent.photo.file_id
+                client.custom_start_pic = new_id
+                try:
+                    await clone_db.update_clone_settings(int(client.bot_id), {"start_pic": new_id})
+                except Exception:
+                    pass
+            return sent
+        except Exception:
+            pass  # bytes দিয়েও না হলে নিচে টেক্সট হিসেবে পাঠাবে
 
     return await reply_target.reply_text(
         text=caption_text,
@@ -432,7 +441,8 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
         "<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
         f"<blockquote>✨ {sc('Your clone is a fully independent bot with its own database. Tap a category below to customize every part of it.')}</blockquote>\n\n"
         f"🎨 {sc('Start Screen')}  •  📝 {sc('Caption')}  •  🔗 {sc('Shortener')}\n"
-        f"📢 {sc('Force Sub')}  •  ⏱ {sc('Auto Delete')}  •  👮 {sc('Moderators')}"
+        f"📢 {sc('Force Sub')}  •  ⏱ {sc('Auto Delete')}  •  👮 {sc('Moderators')}\n"
+        f"🛠 {sc('Clone Bot Control')}: 🔁 {sc('Restart')}  •  ⛔ {sc('Deactivate')}  •  🔄 {sc('Change Bot')}  •  🗑 {sc('Delete')}"
     )
     if not viewer_is_owner:
         mod = next((m for m in active_moderators(clone_doc) if int(m["user_id"]) == viewer_id), None)
@@ -440,10 +450,7 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
             if mod_is_permanent(mod["expires_at"]):
                 text += "\n\n👮 <i>You are a moderator of this bot.</i>"
             else:
-                text += (
-                "\n\n👮 <i>You are a moderator of this bot.</i>" if mod_is_permanent(mod["expires_at"])
-                else f"\n\n👮 <i>You are a temporary moderator — {mod_left_text(mod['expires_at'])}.</i>"
-            )
+                text += f"\n\n👮 <i>You are a temporary moderator — {mod_left_text(mod['expires_at'])}.</i>"
 
     sfx = f"{owner_id}#{bot_id}"
     buttons = [
@@ -484,7 +491,7 @@ async def show_manage_clone_panel(target, clone_doc: dict, is_callback: bool = T
             InlineKeyboardButton(sc("🔄 Reset All"), callback_data=f"clone_reset#{bot_id}"),
         ],
         # ✨ Restart / Deactivate / Delete / Change Bot — সব এই এক বাটনের ভিতরে
-        [InlineKeyboardButton(sc("⚙️ Clone Bot Control"), callback_data=f"clone_control#{bot_id}")],
+        [InlineKeyboardButton(sc("🛠 Clone Bot Control"), callback_data=f"clone_control#{bot_id}")],
         # Back সরাসরি Home-এ যায় (আগে "clone_card"-এ যেত যা একই প্যানেল আবার খুলত)
         [InlineKeyboardButton(sc("« Back"), callback_data="start")],
     ]
@@ -502,7 +509,7 @@ async def show_control_view(target, clone_doc: dict):
     viewer_is_owner = is_owner(clone_doc, target.from_user.id)
     active = clone_doc.get("status", "active") == "active"
     text = (
-        f"<b>⚙️ {sc('Bot Control')}</b>\n"
+        f"<b>🛠 {sc('Clone Bot Control')}</b>\n"
         "<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
         f"🤖 @{clone_doc.get('bot_username')}  •  {'🟢 Active' if active else '🔴 Inactive'}\n"
         "<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
@@ -933,10 +940,12 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
         if not clone_doc or not has_clone_access(clone_doc, user_id):
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
+        # ✨ সেটিংস সবসময় ওনারের — মডারেটর বাটন চাপলেও ওনারের ডাটা বদলায়
+        owner_id = int(clone_doc["owner_id"])
         clone_user_db = get_clone_database(bot_id, clone_doc["db_name"])
-        owner_settings = await clone_user_db.get_user(user_id)
+        owner_settings = await clone_user_db.get_user(owner_id)
         new_val = not bool(owner_settings.get("protect_content", False))
-        await clone_user_db.update_user_info(user_id, {"protect_content": new_val})
+        await clone_user_db.update_user_info(owner_id, {"protect_content": new_val})
         await query.answer(f"🛡 Content Protection is now {'ON' if new_val else 'OFF'}")
         await show_manage_clone_panel(query, clone_doc, is_callback=True)
         return True
@@ -1391,8 +1400,16 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
         ]])
         await send_or_edit_text(
             query,
-            "⚠️ <b>Are you sure you want to delete your clone?</b>\n\n"
-            "This will permanently stop the cloned bot and erase all of its saved files and user data. This action cannot be undone.",
+            "⚠️ <b>Delete your clone? / ক্লোন ডিলিট করবেন?</b>\n"
+            "<code>━━━━━━━━━━━━━━━━━━━━</code>\n\n"
+            "🇬🇧 <b>English</b>\n"
+            "<blockquote>This will permanently stop the bot and erase all its settings and user data. "
+            "<b>Your files can NOT be recovered</b> and <b>all your links (including permanent links) will expire</b>. "
+            "This cannot be undone.</blockquote>\n\n"
+            "🇧🇩 <b>বাংলা</b>\n"
+            "<blockquote>এটা বটটি চিরতরে বন্ধ করে দেবে এবং এর সব সেটিংস ও ইউজার ডেটা মুছে ফেলবে। "
+            "<b>ফাইল আর ফিরে পাওয়া সম্ভব হবে না</b> এবং <b>আপনার সব লিংক (পার্মানেন্ট লিংকসহ) এক্সপায়ার হয়ে যাবে</b>। "
+            "এটা আর ফেরানো যাবে না।</blockquote>",
             btn,
         )
         return True
