@@ -7,38 +7,42 @@ from Script import script
 from database import db, get_db
 from utils import temp, logger, looks_like_link_code, str_to_b64
 
+def _k(bot, userid: int):
+    """✨ ক্যাশ-কি = (bot_id, userid): এক বটে ভেরিফাই করলে অন্য ক্লোনে ভেরিফায়েড দেখাবে না"""
+    return (int(getattr(bot, "bot_id", 0) or 0), int(userid))
+
+
 # -------------------------- TOKEN VALIDITY CHECK --------------------------
-async def check_token(bot, userid: int, token: str) -> bool:
-    tokens = temp.TOKENS.get(userid, {})
-    return token in tokens and tokens[token] is False
+async def check_token(bot, userid: int, token: str):
+    """টোকেন ঠিক ও অব্যবহৃত হলে তার তথ্য (owner_uid, file_id) রিটার্ন করে, নইলে None"""
+    entry = temp.TOKENS.get(_k(bot, userid), {}).get(token)
+    return entry if entry and not entry["used"] else None
 
 # -------------------------- TOKEN GENERATOR --------------------------
 async def get_token(bot, userid: int, link: str, owner_uid: int, file_id) -> str:
     db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     token = "".join(random.choices(string.ascii_letters + string.digits, k=7))
 
-    if userid not in temp.TOKENS:
-        temp.TOKENS[userid] = {}
-    temp.TOKENS[userid][token] = False
+    # ✨ owner_uid ও file_id মেমোরিতে থাকে; লিংকে শুধু verify-{userid}-{token}
+    # (টেলিগ্রামের ?start= শুধু A-Z a-z 0-9 _ - মানে, আর সর্বোচ্চ ৬৪ অক্ষর — কোলন (:) চলে না)
+    temp.TOKENS.setdefault(_k(bot, userid), {})[token] = {
+        "used": False, "owner": int(owner_uid), "file": str(file_id),
+    }
 
-    full_link = f"{link}verify-{userid}-{owner_uid}:{file_id}-{token}"
+    full_link = f"{link}verify-{userid}-{token}"
 
     owner = await db.get_user(owner_uid)
     return await db.get_verify_link(owner, full_link)
 
 # -------------------------- GET VERIFICATION STATUS --------------------------
-# ⚠️ নোট: temp.VERIFIED/temp.TOKENS ক্যাশ পুরো process-এর জন্য একটাই (মূল বট +
-# সব ক্লোন শেয়ার করে)। এতে persistent DB ডাটা সব সময় সঠিক ক্লোনের নিজস্ব db-তেই
-# সেভ/রিড হয় (এটাই গুরুত্বপূর্ণ), শুধু এই in-memory ক্যাশটা (temporary, রিস্টার্টে
-# মুছে যায়) যদি একই Telegram user_id মূল বট ও কোনো ক্লোনে একইসাথে ভেরিফাই করে,
-# তাহলে সামান্য ওভারল্যাপ হতে পারে — সেটা ঠিক করতে চাইলে আলাদাভাবে জানাবেন।
 async def get_verify_status(bot, userid: int) -> dict | None:
     db = get_db(bot)
-    status = temp.VERIFIED.get(userid)
+    key = _k(bot, userid)
+    status = temp.VERIFIED.get(key)
     if not status:
         status = await db.get_verified(userid)
     if status:
-        temp.VERIFIED[userid] = status
+        temp.VERIFIED[key] = status
     return status
 
 # -------------------------- UPDATE VERIFICATION STATUS --------------------------
@@ -47,13 +51,13 @@ async def update_verify_status(bot, userid: int, date_temp: str, time_temp: str)
     status = await get_verify_status(bot, userid) or {}
     status["date"] = date_temp
     status["time"] = time_temp
-    temp.VERIFIED[userid] = status
+    temp.VERIFIED[_k(bot, userid)] = status
     await db.update_verification(userid, date_temp, time_temp)
 
 # -------------------------- VERIFY USER --------------------------
 async def verify_user(bot, userid: int, token: str, owner_uid: int):
     db = get_db(bot)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
-    temp.TOKENS[userid][token] = True
+    temp.TOKENS[_k(bot, userid)][token]["used"] = True
 
     uinfo = await db.get_user(owner_uid)
     expire_seconds = uinfo.get("verify_expire", VERIFY_EXPIRE)
@@ -92,9 +96,8 @@ async def check_verification(bot, userid: int) -> bool:
 async def handle_verify_case(client, message, raw: str):
     db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     try:
-        _, userid, data, token = raw.split("-", 3)
-        owner_uid, file_id = data.split(":", 1)   # file_id এখন লিংক-কোড (স্ট্রিং) — পুরনো লিংকে সংখ্যা/c_xxx
-        owner_uid = int(owner_uid)
+        _, userid, token = raw.split("-", 2)
+        int(userid)
     except Exception:
         return await message.reply_text("<b>⚠️ Invalid or expired link. Try again!</b>")
 
@@ -102,9 +105,11 @@ async def handle_verify_case(client, message, raw: str):
     if str(message.from_user.id) != str(userid):
         return await message.reply_text("<b>⚠️ This link is not for you!</b>")
 
-    # ✅ token validity check
-    if not await check_token(client, int(userid), token):
+    # ✅ token validity check (owner_uid ও file_id মেমোরি থেকে আসে)
+    entry = await check_token(client, int(userid), token)
+    if not entry:
         return await message.reply_text("<b>⚠️ Link expired or already used!</b>")
+    owner_uid, file_id = entry["owner"], entry["file"]
 
     # ✅ verified होने के बाद file button देना
     bot_username = getattr(client, "username", None) or (await client.get_me()).username
@@ -132,19 +137,22 @@ async def handle_verify_case(client, message, raw: str):
     owner = await db.get_user(owner_uid)
     log_channel = owner.get("log_channel") or LOG_CHANNEL
 
-    # ✅ log send करना
-    await client.send_message(
-        log_channel,
-        script.VERIFIED_LOG_TEXT.format(
-            message.from_user.mention,
-            message.from_user.id,
-            datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%d %B %Y")
+    # ✅ log send करना — লগ চ্যানেলে পাঠাতে না পারলেও ভেরিফিকেশন যেন না ভাঙে
+    try:
+        await client.send_message(
+            log_channel,
+            script.VERIFIED_LOG_TEXT.format(
+                message.from_user.mention,
+                message.from_user.id,
+                datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%d %B %Y")
+            )
         )
-    )
+    except Exception as e:
+        logger.warning(f"Verification log send failed ({log_channel}): {e}")
     return True
 
 # -------------------------- VERIFICATION ENTRY -------------------------- #
-async def av_verification(client, message, owner_uid: int = None, file_id="0"):
+async def primexbots_verification(client, message, owner_uid: int = None, file_id="0"):
     db = get_db(client)   # ✨ মূল বট হলে মূল db, ক্লোন হলে ক্লোনের নিজস্ব db
     user_id = message.from_user.id
 
@@ -191,3 +199,4 @@ async def av_verification(client, message, owner_uid: int = None, file_id="0"):
         return False
 
     return True
+                    
