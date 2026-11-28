@@ -81,6 +81,22 @@ class CloneDB:
     async def total_clones_count(self) -> int:
         return await self.clones.count_documents({})
 
+    # ================= ✨ Clone statistics (admin) ✨ =================
+    async def bump_deleted(self):
+        """কতগুলো ক্লোন ডিলিট হয়েছে তার স্থায়ী কাউন্টার (ডিপ্লয়ের পর থেকে গোনা শুরু)"""
+        await mydb.clone_stats.update_one({"_id": "counts"}, {"$inc": {"deleted": 1}}, upsert=True)
+
+    async def get_clone_counts(self) -> dict:
+        total = await self.clones.count_documents({})
+        active = await self.clones.count_documents({"status": "active"})
+        doc = await mydb.clone_stats.find_one({"_id": "counts"}) or {}
+        return {
+            "total": total,
+            "active": active,
+            "inactive": total - active,
+            "deleted": int(doc.get("deleted", 0)),
+        }
+
     async def set_status(self, bot_id: int, status: str):
         await self.clones.update_one({"bot_id": int(bot_id)}, {"$set": {"status": status}})
 
