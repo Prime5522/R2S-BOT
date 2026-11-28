@@ -5,6 +5,8 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import ADMINS
 from database import db
+from database.clonedb import clone_db
+from clone_manager import RUNNING_CLONES
 
 # ✅ Bot Stats Command
 @Client.on_message(filters.private & filters.command("stats") & filters.user(ADMINS))
@@ -16,9 +18,16 @@ async def bot_stats(client: Client, message: Message):
    # total_files = await db.files.count_documents({})
   #  verified_users = await db.get_verified_users_count()  # ✅ Use your function here
 
+    cc = await clone_db.get_clone_counts()
+
     text = (
         "📊 <b>Bot Statistics</b>\n\n"
-        f"👥 <b>Total Users:</b> <code>{total_users}</code>\n"
+        f"👥 <b>Total Users:</b> <code>{total_users}</code>\n\n"
+        "🤖 <b>Clone Bots</b>\n"
+        f"├ 📦 <b>Currently cloned:</b> <code>{cc['total']}</code>\n"
+        f"├ 🟢 <b>Active:</b> <code>{cc['active']}</code>  (online now: <code>{len(RUNNING_CLONES)}</code>)\n"
+        f"├ 🔴 <b>Inactive:</b> <code>{cc['inactive']}</code>\n"
+        f"└ 🗑 <b>Deleted:</b> <code>{cc['deleted']}</code>\n"
       #  f"⭐ <b>Premium Users:</b> <code>{premium_users}</code>\n"
        # f"✅ <b>Verified Users:</b> <code>{verified_users}</code>\n"
       #  f"🚫 <b>Blocked Users:</b> <code>{blocked_users}</code>\n"
