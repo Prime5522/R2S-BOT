@@ -1,6 +1,9 @@
 import io
 import re
 import time
+from datetime import datetime
+
+import pytz
 from bson.binary import Binary
 from pyrogram import Client, filters, enums
 from pyrogram.types import (
@@ -13,7 +16,7 @@ from pyrogram.errors import UserNotParticipant
 from config import (
     MAIN_BOT_USERNAME, MAX_CLONE_PER_USER, PICS,
     CLONE_CREATION_FSUB_CHANNEL, CLONE_CREATION_FSUB_INVITE,
-    MODERATOR_DURATION_HOURS,
+    MODERATOR_DURATION_HOURS, LOG_CHANNEL,
 )
 from Script import script
 from database import get_db, get_clone_database
@@ -312,6 +315,52 @@ async def _get_fsub_invite_link(client: Client, channel_id: int) -> str:
         return "https://t.me/"
 
 
+async def log_clone_event(client: Client, kind: str, owner_id: int, bot_username: str,
+                           bot_id: int, extra: str = ""):
+    """
+    ✨ মূল বটের LOG_CHANNEL-এ ক্লোন-ইভেন্টের সুন্দর লগ: তৈরি / ডিলিট / বট বদল।
+    বট লিংক + ওনারের বিস্তারিত থাকে। লগ না গেলেও মূল কাজ কখনো আটকায় না।
+    """
+    try:
+        try:
+            u = await client.get_users(int(owner_id))
+            name = (u.first_name or "") + (f" {u.last_name}" if u.last_name else "")
+            uname = f"@{u.username}" if u.username else "—"
+            mention = u.mention
+        except Exception:
+            name, uname, mention = str(owner_id), "—", f"<code>{owner_id}</code>"
+
+        counts = await clone_db.get_clone_counts()
+        titles = {
+            "created": "🆕 <b>New Clone Created</b>",
+            "deleted": "🗑 <b>Clone Deleted</b>",
+            "changed": "🔄 <b>Clone Bot Changed</b>",
+        }
+        when = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p")
+        text = (
+            f"{titles.get(kind, kind)}\n"
+            "<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
+            f"🤖 <b>Bot:</b> @{bot_username}\n"
+            f"🔗 <b>Link:</b> https://t.me/{bot_username}\n"
+            f"🆔 <b>Bot ID:</b> <code>{bot_id}</code>\n\n"
+            f"👤 <b>Owner:</b> {mention}\n"
+            f"📛 <b>Name:</b> {name}\n"
+            f"🔖 <b>Username:</b> {uname}\n"
+            f"🆔 <b>User ID:</b> <code>{owner_id}</code>\n"
+            f"{extra}"
+            "<code>━━━━━━━━━━━━━━━━━━━━</code>\n"
+            f"📅 <b>Time:</b> {when} (IST)\n"
+            f"📊 <b>Clones now:</b> <code>{counts['total']}</code> "
+            f"(🟢 {counts['active']} • 🔴 {counts['inactive']})  |  🗑 <b>Deleted:</b> <code>{counts['deleted']}</code>"
+        )
+        markup = None
+        if kind != "deleted":
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Open Bot", url=f"https://t.me/{bot_username}")]])
+        await client.send_message(LOG_CHANNEL, text, reply_markup=markup, disable_web_page_preview=True)
+    except Exception as e:
+        print(f"[clone-log] failed: {e!r}")
+
+
 async def _finalize_clone_creation(client: Client, reply_target, user_id: int, token: str, owner_mention: str):
     wait_msg = await reply_target.reply_text("<i>⏳ Verifying token and starting your clone bot, please wait...</i>")
     try:
@@ -323,6 +372,7 @@ async def _finalize_clone_creation(client: Client, reply_target, user_id: int, t
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="start")]]),
         )
         return
+    await log_clone_event(client, "created", user_id, me.username, me.id)
     await wait_msg.edit_text(
         f"✨ <b>Successfully Cloned Your Bot!</b>\n\n"
         f"🤖 <b>Bot:</b> @{me.username}\n\n"
@@ -1379,7 +1429,17 @@ async def handle_clone_callback(client: Client, query: CallbackQuery) -> bool:
             await query.answer("⚠️ Access denied!", show_alert=True)
             return True
 
+        # লগের জন্য ডিলিটের আগেই কিছু তথ্য নিয়ে রাখা
+        extra = ""
+        try:
+            cdb_tmp = get_clone_database(bot_id, clone_doc["db_name"])
+            extra = (f"👥 <b>Users:</b> <code>{await cdb_tmp.total_users_count()}</code>  "
+                     f"🔗 <b>Links:</b> <code>{await cdb_tmp.files.count_documents({})}</code>\n")
+        except Exception:
+            pass
         await delete_clone(bot_id)
+        await clone_db.bump_deleted()
+        await log_clone_event(client, "deleted", clone_doc["owner_id"], clone_doc.get("bot_username"), bot_id, extra)
         await send_or_edit_text(
             query,
             "✅ Your cloned bot and all of its data have been permanently deleted.",
@@ -2023,6 +2083,8 @@ async def clone_and_settings_input_handler(client: Client, message: Message):
             await message.stop_propagation()
             return
 
+        await log_clone_event(client, "changed", user_id, new_me.username, new_me.id,
+                              f"♻️ <b>Old bot:</b> @{clone_doc.get('bot_username')}\n")
         note = ""
         if clone_doc.get("storage_channel"):
             note = f"\n\n📦 <b>Important:</b> add @{new_me.username} as <b>admin</b> of your Storage Channel so files keep working."
